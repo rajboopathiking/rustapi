@@ -65,6 +65,38 @@ struct RouteEntry {
 
 type Routes = Arc<Mutex<Vec<RouteEntry>>>;
 
+// ---------- MCP registries ----------
+// Same shape as RouteEntry/Routes above, but for MCP tools/resources/prompts.
+// Kept separate from the HTTP route table since they're dispatched via
+// JSON-RPC (POST /mcp) rather than path/method matching.
+
+struct ToolEntry {
+    name: String,
+    description: String,
+    schema: Option<Py<PyAny>>, // JSON-schema dict, built once at registration time
+    handler: Py<PyAny>,
+    is_async: bool,
+}
+
+struct ResourceEntry {
+    uri: String,
+    description: String,
+    mime_type: String,
+    handler: Py<PyAny>,
+    is_async: bool,
+}
+
+struct PromptEntry {
+    name: String,
+    description: String,
+    handler: Py<PyAny>,
+    is_async: bool,
+}
+
+type Tools = Arc<Mutex<Vec<ToolEntry>>>;
+type Resources = Arc<Mutex<Vec<ResourceEntry>>>;
+type Prompts = Arc<Mutex<Vec<PromptEntry>>>;
+
 fn path_segments(path: &str) -> Vec<&str> {
     path.split('/').filter(|s| !s.is_empty()).collect()
 }
@@ -284,6 +316,13 @@ struct Engine {
     // at Engine construction time instead of being eval()'d from a hand-built string
     // on every single request - faster, and immune to string-escaping mistakes.
     serializer: PyObject,
+    // MCP (Model Context Protocol) registries. Same instance can serve both plain
+    // HTTP routes and an MCP server over Streamable HTTP at POST /mcp.
+    tools: Tools,
+    resources: Resources,
+    prompts: Prompts,
+    schema_fn: PyObject,   // builds a JSON-schema dict from a function's type hints
+    mcp_dispatch: PyObject, // async JSON-RPC dispatcher (initialize/tools/call/etc.)
 }
 
 #[allow(non_local_definitions)]
@@ -293,11 +332,129 @@ impl Engine {
     fn new(py: Python<'_>) -> PyResult<Self> {
         let asgi_code = r#"
 import asyncio
+import inspect
 import json
+import typing
 import urllib.parse
 
 def _serialize_response(val):
     return json.dumps(val, default=lambda o: o.model_dump() if hasattr(o, "model_dump") else str(o))
+
+_JSON_TYPE_MAP = {str: "string", int: "integer", float: "number", bool: "boolean", list: "array", dict: "object"}
+
+def _schema_from_signature(func):
+    # Builds a JSON-schema "object" describing a function's parameters, from its
+    # type hints. Used to auto-generate MCP tool/prompt input schemas so tools
+    # don't need a hand-written pydantic model just to be exposed over MCP.
+    sig = inspect.signature(func)
+    properties = {}
+    required = []
+    for name, param in sig.parameters.items():
+        ann = param.annotation
+        py_type = ann if ann is not inspect.Parameter.empty else str
+        optional = False
+        if typing.get_origin(py_type) is typing.Union:
+            args = [a for a in typing.get_args(py_type) if a is not type(None)]
+            if len(args) == 1:
+                py_type = args[0]
+                optional = True
+        json_type = _JSON_TYPE_MAP.get(py_type, "string")
+        prop = {"type": json_type}
+        if param.default is not inspect.Parameter.empty:
+            prop["default"] = param.default if isinstance(param.default, (str, int, float, bool, type(None))) else None
+        properties[name] = prop
+        if param.default is inspect.Parameter.empty and not optional:
+            required.append(name)
+    schema = {"type": "object", "properties": properties}
+    if required:
+        schema["required"] = required
+    return schema
+
+MCP_PROTOCOL_VERSION = "2025-06-18"
+
+async def handle_mcp_message(message, tools, resources, prompts):
+    msg_id = message.get("id")
+    method = message.get("method")
+    params = message.get("params") or {}
+
+    def ok(result):
+        return {"jsonrpc": "2.0", "id": msg_id, "result": result}
+
+    def err(code, msg):
+        return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": msg}}
+
+    if method == "initialize":
+        return ok({
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
+            "serverInfo": {"name": "rustapi-mcp", "version": "0.1.0"},
+        })
+
+    if method in ("notifications/initialized", "initialized"):
+        return None
+
+    if method == "ping":
+        return ok({})
+
+    if method == "tools/list":
+        items = [
+            {"name": name, "description": meta.get("description") or "", "inputSchema": meta.get("schema") or {"type": "object", "properties": {}}}
+            for name, meta in tools.items()
+        ]
+        return ok({"tools": items})
+
+    if method == "tools/call":
+        name = params.get("name")
+        arguments = params.get("arguments") or {}
+        meta = tools.get(name)
+        if meta is None:
+            return err(-32602, f"Unknown tool: {name}")
+        handler = meta["handler"]
+        try:
+            if meta["is_async"]:
+                result = await handler(**arguments)
+            else:
+                result = await asyncio.to_thread(handler, **arguments)
+            text = result if isinstance(result, str) else _serialize_response(result)
+            return ok({"content": [{"type": "text", "text": text}], "isError": False})
+        except Exception as e:
+            return ok({"content": [{"type": "text", "text": str(e)}], "isError": True})
+
+    if method == "resources/list":
+        items = [
+            {"uri": uri, "name": meta.get("description") or uri, "mimeType": meta.get("mime_type") or "text/plain"}
+            for uri, meta in resources.items()
+        ]
+        return ok({"resources": items})
+
+    if method == "resources/read":
+        uri = params.get("uri")
+        meta = resources.get(uri)
+        if meta is None:
+            return err(-32602, f"Unknown resource: {uri}")
+        handler = meta["handler"]
+        result = await handler() if meta["is_async"] else await asyncio.to_thread(handler)
+        text = result if isinstance(result, str) else _serialize_response(result)
+        return ok({"contents": [{"uri": uri, "mimeType": meta.get("mime_type") or "text/plain", "text": text}]})
+
+    if method == "prompts/list":
+        items = [{"name": name, "description": meta.get("description") or "", "arguments": []} for name, meta in prompts.items()]
+        return ok({"prompts": items})
+
+    if method == "prompts/get":
+        name = params.get("name")
+        arguments = params.get("arguments") or {}
+        meta = prompts.get(name)
+        if meta is None:
+            return err(-32602, f"Unknown prompt: {name}")
+        handler = meta["handler"]
+        text = await handler(**arguments) if meta["is_async"] else await asyncio.to_thread(handler, **arguments)
+        return ok({"messages": [{"role": "user", "content": {"type": "text", "text": text}}]})
+
+    if msg_id is None:
+        return None  # unrecognized notification - do not respond
+
+    return err(-32601, f"Method not found: {method}")
 
 async def asgi_app(engine, req_class, scope, receive, send):
     if scope["type"] != "http":
@@ -375,12 +532,19 @@ async def asgi_app(engine, req_class, scope, receive, send):
         let asgi_handler = module.getattr("asgi_app")?.into();
         let req_class = py.get_type_bound::<PyRequest>().into();
         let serializer = module.getattr("_serialize_response")?.into();
+        let schema_fn = module.getattr("_schema_from_signature")?.into();
+        let mcp_dispatch = module.getattr("handle_mcp_message")?.into();
 
         Ok(Engine {
             routes: Arc::new(Mutex::new(Vec::new())),
             asgi_handler,
             req_class,
             serializer,
+            tools: Arc::new(Mutex::new(Vec::new())),
+            resources: Arc::new(Mutex::new(Vec::new())),
+            prompts: Arc::new(Mutex::new(Vec::new())),
+            schema_fn,
+            mcp_dispatch,
         })
     }
 
@@ -388,6 +552,24 @@ async def asgi_app(engine, req_class, scope, receive, send):
     fn post(&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "POST".into(), path } }
     fn put(&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "PUT".into(), path } }
     fn delete(&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "DELETE".into(), path } }
+
+    // ---- MCP: same Engine instance can expose tools/resources/prompts over
+    // JSON-RPC at POST /mcp, alongside its normal HTTP routes. ----
+
+    #[pyo3(signature = (name=None, description=None))]
+    fn tool(&self, py: Python<'_>, name: Option<String>, description: Option<String>) -> ToolDecorator {
+        ToolDecorator { tools: self.tools.clone(), schema_fn: self.schema_fn.clone_ref(py), name, description }
+    }
+
+    #[pyo3(signature = (uri, mime_type=None))]
+    fn resource(&self, uri: String, mime_type: Option<String>) -> ResourceDecorator {
+        ResourceDecorator { resources: self.resources.clone(), uri, mime_type }
+    }
+
+    #[pyo3(signature = (name=None, description=None))]
+    fn prompt(&self, name: Option<String>, description: Option<String>) -> PromptDecorator {
+        PromptDecorator { prompts: self.prompts.clone(), name, description }
+    }
 
     #[pyo3(signature = (scope, receive, send))]
     fn __call__<'py>(
@@ -480,6 +662,10 @@ async def asgi_app(engine, req_class, scope, receive, send):
 
         let routes = self.routes.clone();
         let serializer = self.serializer.clone_ref(py);
+        let tools = self.tools.clone();
+        let resources = self.resources.clone();
+        let prompts = self.prompts.clone();
+        let mcp_dispatch = self.mcp_dispatch.clone_ref(py);
         let addr: SocketAddr = format!("{host}:{port}")
             .parse()
             .map_err(|e: std::net::AddrParseError| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
@@ -501,8 +687,20 @@ async def asgi_app(engine, req_class, scope, receive, send):
                 let make_svc = make_service_fn(move |_conn| {
                     let routes = routes.clone();
                     let serializer = serializer.clone();
+                    let tools = tools.clone();
+                    let resources = resources.clone();
+                    let prompts = prompts.clone();
+                    let mcp_dispatch = mcp_dispatch.clone();
                     async move {
-                        Ok::<_, Infallible>(service_fn(move |req| handle(req, routes.clone(), serializer.clone())))
+                        Ok::<_, Infallible>(service_fn(move |req| handle(
+                            req,
+                            routes.clone(),
+                            serializer.clone(),
+                            tools.clone(),
+                            resources.clone(),
+                            prompts.clone(),
+                            mcp_dispatch.clone(),
+                        )))
                     }
                 });
 
@@ -549,7 +747,15 @@ async def asgi_app(engine, req_class, scope, receive, send):
     }
 }
 
-async fn handle(req: HyperRequest<Body>, routes: Routes, serializer: PyObject) -> Result<HyperResponse<Body>, Infallible> {
+async fn handle(
+    req: HyperRequest<Body>,
+    routes: Routes,
+    serializer: PyObject,
+    tools: Tools,
+    resources: Resources,
+    prompts: Prompts,
+    mcp_dispatch: PyObject,
+) -> Result<HyperResponse<Body>, Infallible> {
     let start_time = Instant::now();
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
@@ -566,6 +772,62 @@ async fn handle(req: HyperRequest<Body>, routes: Routes, serializer: PyObject) -
             generate_openapi(&guard)
         };
         (200, spec, "application/json")
+    } else if method == "POST" && path == "/mcp" {
+        // MCP Streamable HTTP transport (simplified): one JSON-RPC message in,
+        // one JSON response out. No SSE/server-push in this version.
+        let outcome = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> Result<(u16, String), PyErr> {
+                let json_mod = py.import_bound("json")?;
+                let message = json_mod.call_method1("loads", (&body,))?;
+
+                let tools_dict = pyo3::types::PyDict::new_bound(py);
+                for t in tools.lock().unwrap().iter() {
+                    let meta = pyo3::types::PyDict::new_bound(py);
+                    meta.set_item("handler", t.handler.clone_ref(py))?;
+                    meta.set_item("is_async", t.is_async)?;
+                    meta.set_item("schema", t.schema.as_ref().map(|s| s.clone_ref(py)))?;
+                    meta.set_item("description", &t.description)?;
+                    tools_dict.set_item(&t.name, meta)?;
+                }
+
+                let resources_dict = pyo3::types::PyDict::new_bound(py);
+                for r in resources.lock().unwrap().iter() {
+                    let meta = pyo3::types::PyDict::new_bound(py);
+                    meta.set_item("handler", r.handler.clone_ref(py))?;
+                    meta.set_item("is_async", r.is_async)?;
+                    meta.set_item("description", &r.description)?;
+                    meta.set_item("mime_type", &r.mime_type)?;
+                    resources_dict.set_item(&r.uri, meta)?;
+                }
+
+                let prompts_dict = pyo3::types::PyDict::new_bound(py);
+                for p in prompts.lock().unwrap().iter() {
+                    let meta = pyo3::types::PyDict::new_bound(py);
+                    meta.set_item("handler", p.handler.clone_ref(py))?;
+                    meta.set_item("is_async", p.is_async)?;
+                    meta.set_item("description", &p.description)?;
+                    prompts_dict.set_item(&p.name, meta)?;
+                }
+
+                let coro = mcp_dispatch.bind(py).call1((message, tools_dict, resources_dict, prompts_dict))?;
+                let asyncio = py.import_bound("asyncio")?;
+                let result = asyncio.call_method1("run", (coro,))?;
+
+                if result.is_none() {
+                    // JSON-RPC notification - no response body per spec.
+                    Ok((202, String::new()))
+                } else {
+                    let serialized: String = serializer.bind(py).call1((result,))?.extract()?;
+                    Ok((200, serialized))
+                }
+            })
+        }).await;
+
+        match outcome {
+            Ok(Ok((s, b))) => (s, b, "application/json"),
+            Ok(Err(e)) => (500, format!(r#"{{"error":"{}"}}"#, e.to_string().replace('"', "'")), "application/json"),
+            Err(_) => (500, r#"{"error":"Rust background task panicked"}"#.to_string(), "application/json"),
+        }
     } else {
         let matched = {
             let guard = routes.lock().unwrap();
@@ -703,6 +965,112 @@ impl RouteDecorator {
         Ok(func)
     }
 }
+
+// ---------- MCP decorators ----------
+// Mirror RouteDecorator above: Engine.tool()/.resource()/.prompt() return one of
+// these, which registers the wrapped function on __call__ and hands it straight
+// back unmodified (so it stays a normal, directly-callable Python function).
+
+#[pyclass]
+struct ToolDecorator {
+    tools: Tools,
+    schema_fn: PyObject,
+    name: Option<String>,
+    description: Option<String>,
+}
+
+#[allow(non_local_definitions)]
+#[pymethods]
+impl ToolDecorator {
+    fn __call__(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let inspect = py.import_bound("inspect")?;
+        let is_async: bool = inspect
+            .getattr("iscoroutinefunction")?
+            .call1((func.bind(py),))?
+            .extract()?;
+        let fname: String = func.bind(py).getattr("__name__")?.extract()?;
+        let doc: Option<String> = inspect
+            .call_method1("getdoc", (func.bind(py),))?
+            .extract()
+            .unwrap_or(None);
+
+        let schema_obj = self.schema_fn.bind(py).call1((func.bind(py),))?;
+
+        self.tools.lock().unwrap().push(ToolEntry {
+            name: self.name.clone().unwrap_or(fname),
+            description: self.description.clone().or(doc).unwrap_or_default(),
+            schema: Some(schema_obj.into()),
+            handler: func.clone_ref(py),
+            is_async,
+        });
+        Ok(func)
+    }
+}
+
+#[pyclass]
+struct ResourceDecorator {
+    resources: Resources,
+    uri: String,
+    mime_type: Option<String>,
+}
+
+#[allow(non_local_definitions)]
+#[pymethods]
+impl ResourceDecorator {
+    fn __call__(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let inspect = py.import_bound("inspect")?;
+        let is_async: bool = inspect
+            .getattr("iscoroutinefunction")?
+            .call1((func.bind(py),))?
+            .extract()?;
+        let doc: Option<String> = inspect
+            .call_method1("getdoc", (func.bind(py),))?
+            .extract()
+            .unwrap_or(None);
+
+        self.resources.lock().unwrap().push(ResourceEntry {
+            uri: self.uri.clone(),
+            description: doc.unwrap_or_default(),
+            mime_type: self.mime_type.clone().unwrap_or_else(|| "text/plain".to_string()),
+            handler: func.clone_ref(py),
+            is_async,
+        });
+        Ok(func)
+    }
+}
+
+#[pyclass]
+struct PromptDecorator {
+    prompts: Prompts,
+    name: Option<String>,
+    description: Option<String>,
+}
+
+#[allow(non_local_definitions)]
+#[pymethods]
+impl PromptDecorator {
+    fn __call__(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let inspect = py.import_bound("inspect")?;
+        let is_async: bool = inspect
+            .getattr("iscoroutinefunction")?
+            .call1((func.bind(py),))?
+            .extract()?;
+        let fname: String = func.bind(py).getattr("__name__")?.extract()?;
+        let doc: Option<String> = inspect
+            .call_method1("getdoc", (func.bind(py),))?
+            .extract()
+            .unwrap_or(None);
+
+        self.prompts.lock().unwrap().push(PromptEntry {
+            name: self.name.clone().unwrap_or(fname),
+            description: self.description.clone().or(doc).unwrap_or_default(),
+            handler: func.clone_ref(py),
+            is_async,
+        });
+        Ok(func)
+    }
+}
+
 #[pymodule]
 fn rustapi(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Engine>()?;
