@@ -1,0 +1,26 @@
+[package]
+name = "rustapi"
+version = "0.1.0"
+edition = "2021"
+description = "A FastAPI-style Python web framework with a Rust (tokio/hyper) core"
+license = "MIT"
+repository = "https://github.com/rajboopathiking/rustapi"
+
+[lib]
+name = "rustapi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.21", features = ["extension-module"] }
+hyper = { version = "0.14", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
+signal-hook = "0.4.4"
+urlencoding = "2"
+indexmap = "=2.2.6"
+walkdir = "2.5.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
