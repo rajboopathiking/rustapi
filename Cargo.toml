@@ -8,16 +8,19 @@ repository = "https://github.com/rajboopathiking/rustapi"
 
 [lib]
 name = "rustapi"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.21", features = ["extension-module"] }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
 hyper = { version = "0.14", features = ["full"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.0", features = ["full"] }
+serde_json = "1.0"
+urlencoding = "2.1"
+notify = "6.1.1"
 signal-hook = "0.4.4"
-urlencoding = "2"
-indexmap = "=2.2.6"
 walkdir = "2.5.0"
+indexmap = "2.2.6"
+socket2 = "0.5"
 
 [profile.release]
 opt-level = 3

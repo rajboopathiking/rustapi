@@ -4,6 +4,8 @@ A FastAPI-style Python web framework backed by a Rust (`tokio` + `hyper`) core.
 Python gives you the developer experience; Rust owns the socket, async I/O,
 routing, and parameter parsing.
 
+```A FastAPI-style framework that minimizes Python overhead by moving networking, routing, and request parsing into Rust. It's designed to outperform traditional Python web frameworks on framework overhead while preserving Python's developer experience.```
+
 ```python
 import rustapi
 
