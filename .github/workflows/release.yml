@@ -1,15 +1,14 @@
 name: Build and Publish to PyPI
 
-# `release.yml` - Build wheels on multiple OSes, collect artifacts, then publish to PyPI
 on:
   push:
     tags:
       - 'v*'
 
-# ---------------------------------------------------
-# STAGE 1: Build the Wheels on all Operating Systems
-# ---------------------------------------------------
 jobs:
+  # ---------------------------------------------------
+  # STAGE 1: Build the Wheels on all Operating Systems
+  # ---------------------------------------------------
   build-wheels:
     name: Build Wheels (${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.os }}
@@ -29,7 +28,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
@@ -46,9 +45,6 @@ jobs:
           name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist
 
-# ---------------------------------------------------
-# STAGE 2: Publish all collected wheels to PyPI
-# ---------------------------------------------------
   # ---------------------------------------------------
   # STAGE 2: Publish all collected wheels to PyPI
   # ---------------------------------------------------
@@ -56,7 +52,7 @@ jobs:
     name: Publish to PyPI
     needs: build-wheels
     runs-on: ubuntu-latest
-
+    
     steps:
       - name: Download all built wheels
         uses: actions/download-artifact@v4
@@ -69,4 +65,4 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
-          password: ${{ secrets.PYPI_API_TOKEN }}  # ✅ Added this line to use your secret!
+          password: ${{ secrets.PYPI_API_TOKEN }}
