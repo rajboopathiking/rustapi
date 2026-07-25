@@ -52,11 +52,11 @@ jobs:
   # ---------------------------------------------------
   publish:
     name: Publish to PyPI
-    needs: build-wheels  # Wait for all OS builds to finish successfully
+    needs: build-wheels
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write  # REQUIRED for PyPI Trusted Publishers (OIDC)
-      contents: read
+    
+    # ❌ REMOVED the 'permissions: id-token: write' block from here
+
     steps:
       - name: Download all built wheels
         uses: actions/download-artifact@v4
@@ -69,3 +69,4 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          password: ${{ secrets.PYPI_API_TOKEN }}
