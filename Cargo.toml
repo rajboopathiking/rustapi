@@ -2,28 +2,26 @@
 name = "rustapi"
 version = "0.1.0"
 edition = "2021"
-description = "A FastAPI-style Python web framework with a Rust (tokio/hyper) core"
+description = "A FastAPI-style Python web framework with a Rust tokio/hyper core, plus a built-in MCP server (JSON-RPC over Streamable HTTP)."
 license = "MIT"
-repository = "https://github.com/rajboopathiking/rustapi"
+readme = "README.md"
 
 [lib]
-name = "rustapi"
+# Compiled extension module name; the Python wrapper package (python/rustapi/__init__.py)
+# imports from this and re-exports a clean public API.
+name = "_rustapi"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
+pyo3 = { version = "0.21", features = ["extension-module"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 hyper = { version = "0.14", features = ["full"] }
-tokio = { version = "1.0", features = ["full"] }
-serde_json = "1.0"
-urlencoding = "2.1"
-notify = "6.1.1"
-signal-hook = "0.4.4"
-walkdir = "2.5.0"
-indexmap = "2.2.6"
-socket2 = "0.5"
+serde_json = "1"
+urlencoding = "2"
+notify = "6"
+socket2 = { version = "0.5", features = ["all"] }
 
 [profile.release]
-opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
