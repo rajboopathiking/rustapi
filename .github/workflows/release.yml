@@ -49,13 +49,14 @@ jobs:
 # ---------------------------------------------------
 # STAGE 2: Publish all collected wheels to PyPI
 # ---------------------------------------------------
+  # ---------------------------------------------------
+  # STAGE 2: Publish all collected wheels to PyPI
+  # ---------------------------------------------------
   publish:
     name: Publish to PyPI
     needs: build-wheels
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write  # REQUIRED for PyPI Trusted Publishers (OIDC)
-      contents: read
+
     steps:
       - name: Download all built wheels
         uses: actions/download-artifact@v4
@@ -68,3 +69,4 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          password: ${{ secrets.PYPI_API_TOKEN }}  # ✅ Added this line to use your secret!
