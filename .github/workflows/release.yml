@@ -1,14 +1,15 @@
 name: Build and Publish to PyPI
 
+# `release.yml` - Build wheels on multiple OSes, collect artifacts, then publish to PyPI
 on:
   push:
     tags:
       - 'v*'
 
+# ---------------------------------------------------
+# STAGE 1: Build the Wheels on all Operating Systems
+# ---------------------------------------------------
 jobs:
-  # ---------------------------------------------------
-  # STAGE 1: Build the Wheels on all Operating Systems
-  # ---------------------------------------------------
   build-wheels:
     name: Build Wheels (${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.os }}
@@ -17,20 +18,18 @@ jobs:
       matrix:
         platform:
           - os: ubuntu-latest
-            target: x86_64
+            target: x86_64-unknown-linux-gnu
           - os: macos-latest
-            target: x86_64
-          - os: macos-latest
-            target: aarch64
+            target: x86_64-apple-darwin
           - os: windows-latest
-            target: x64
+            target: x86_64-pc-windows-msvc
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.12'
 
@@ -47,12 +46,12 @@ jobs:
           name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist
 
-  # ---------------------------------------------------
-  # STAGE 2: Publish all collected wheels to PyPI
-  # ---------------------------------------------------
+# ---------------------------------------------------
+# STAGE 2: Publish all collected wheels to PyPI
+# ---------------------------------------------------
   publish:
     name: Publish to PyPI
-    needs: build-wheels  # Wait for all OS builds to finish successfully
+    needs: build-wheels
     runs-on: ubuntu-latest
     permissions:
       id-token: write  # REQUIRED for PyPI Trusted Publishers (OIDC)
