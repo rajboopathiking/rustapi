@@ -1,43 +1,45 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "rustapi"
+name = "rustapi-framework"
 version = "0.1.0"
-description = "A FastAPI-style Python web framework with a Rust (tokio/hyper) core"
+description = "A FastAPI-style Python web framework with a Rust tokio/hyper core, and a built-in MCP server."
 readme = "README.md"
-license = { text = "MIT" }
 requires-python = ">=3.8"
-keywords = ["web", "framework", "rust", "async", "http", "api", "fastapi", "pyo3"]
-authors = [
-    { name = "Your Name", email = "you@example.com" }
-]
+license = { text = "MIT" }
+authors = [{ name = "Boopathi Raj" }]
+keywords = ["web", "framework", "rust", "pyo3", "fastapi", "mcp", "asgi"]
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
-    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
 ]
-
-[project.urls]
-Homepage = "https://github.com/yourusername/rustapi"
-Repository = "https://github.com/yourusername/rustapi"
-Issues = "https://github.com/yourusername/rustapi/issues"
-Changelog = "https://github.com/yourusername/rustapi/blob/main/CHANGELOG.md"
+dependencies = [
+    "pydantic>=2.0",
+]
 
 [project.optional-dependencies]
 test = ["pytest>=7.0", "requests>=2.28"]
 
+[project.urls]
+Homepage = "https://github.com/rajboopathiking/rustapi"
+Repository = "https://github.com/rajboopathiking/rustapi"
+Issues = "https://github.com/rajboopathiking/rustapi/issues"
+
 [tool.maturin]
-module-name = "rustapi"
-strip = true
+python-source = "python"
+module-name = "rustapi._rustapi"
+features = ["pyo3/extension-module"]
