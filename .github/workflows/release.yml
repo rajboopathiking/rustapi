@@ -5,13 +5,12 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  contents: read
-  id-token: write  # Required for PyPI OIDC Trusted Publishers
-
 jobs:
-  release:
-    name: Build & Publish Wheels (${{ matrix.platform.target }})
+  # ---------------------------------------------------
+  # STAGE 1: Build the Wheels on all Operating Systems
+  # ---------------------------------------------------
+  build-wheels:
+    name: Build Wheels (${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
@@ -35,8 +34,38 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build and Publish Wheels
+      - name: Build Wheels (No virtualenv required)
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          command: publish  # Automatically builds optimized release wheels and publishes to PyPI
+          command: build
+          args: --release --out dist
+
+      - name: Save Wheels as Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          path: dist
+
+  # ---------------------------------------------------
+  # STAGE 2: Publish all collected wheels to PyPI
+  # ---------------------------------------------------
+  publish:
+    name: Publish to PyPI
+    needs: build-wheels  # Wait for all OS builds to finish successfully
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # REQUIRED for PyPI Trusted Publishers (OIDC)
+      contents: read
+    steps:
+      - name: Download all built wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
