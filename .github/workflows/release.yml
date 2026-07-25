@@ -39,5 +39,4 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release
-          command: publish  # Handles wheel building + PyPI upload natively without virtualenv issues
+          command: publish  # Automatically builds optimized release wheels and publishes to PyPI
