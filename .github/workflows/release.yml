@@ -17,14 +17,16 @@ jobs:
       matrix:
         platform:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64
           - os: macos-latest
-            target: x86_64-apple-darwin
+            target: x86_64
+          - os: macos-latest
+            target: aarch64
           - os: windows-latest
-            target: x86_64-pc-windows-msvc
+            target: x64
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -50,9 +52,11 @@ jobs:
   # ---------------------------------------------------
   publish:
     name: Publish to PyPI
-    needs: build-wheels
+    needs: build-wheels  # Wait for all OS builds to finish successfully
     runs-on: ubuntu-latest
-    
+    permissions:
+      id-token: write  # REQUIRED for PyPI Trusted Publishers (OIDC)
+      contents: read
     steps:
       - name: Download all built wheels
         uses: actions/download-artifact@v4
@@ -65,4 +69,3 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
-          password: ${{ secrets.PYPI_API_TOKEN }}
