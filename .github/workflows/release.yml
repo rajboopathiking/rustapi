@@ -39,7 +39,8 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           command: build
-          args: --release --out dist
+          # ✅ Added --sdist here so pip has a guaranteed fallback!
+          args: --release --out dist --sdist
 
       - name: Save Wheels as Artifacts
         uses: actions/upload-artifact@v4
@@ -55,8 +56,6 @@ jobs:
     needs: build-wheels
     runs-on: ubuntu-latest
     
-    # ❌ REMOVED the 'permissions: id-token: write' block from here
-
     steps:
       - name: Download all built wheels
         uses: actions/download-artifact@v4
@@ -70,3 +69,4 @@ jobs:
         with:
           packages-dir: dist
           password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true  # ✅ Prevents upload crashes if files overlap
