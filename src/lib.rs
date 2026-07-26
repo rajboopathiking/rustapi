@@ -1,4 +1,3 @@
-
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 use pyo3::types::{PyDict, PyString};
@@ -15,11 +14,9 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request as HyperRequest, Response as HyperResponse, Server};
 use notify::{RecursiveMode, Watcher};
 use serde_json::json;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Semaphore};
 
 const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024; // 10 MB limit
-
-// ---------- Route representation ----------
 
 #[derive(Clone)]
 enum Segment {
@@ -27,15 +24,39 @@ enum Segment {
     Param(String),
 }
 
+struct DependencyMeta {
+    name: String,
+    func: Py<PyAny>,
+    is_async: bool,
+    is_generator: bool,
+    use_cache: bool,
+    id: isize,
+}
+
+impl Clone for DependencyMeta {
+    fn clone(&self) -> Self {
+        Python::with_gil(|py| DependencyMeta {
+            name: self.name.clone(),
+            func: self.func.clone_ref(py),
+            is_async: self.is_async,
+            is_generator: self.is_generator,
+            use_cache: self.use_cache,
+            id: self.id,
+        })
+    }
+}
+
 struct RouteEntry {
     method: String,
     original_path: String,
     segments: Vec<Segment>,
     handler: Py<PyAny>,
-    param_count: usize,
     is_async: bool,
     pydantic_model: Option<Py<PyAny>>,
+    pydantic_param_name: Option<String>,
     request_schema_json: Option<String>,
+    request_param_name: Option<String>,
+    dependencies: Vec<DependencyMeta>,
 }
 
 type Routes = Arc<Mutex<Vec<RouteEntry>>>;
@@ -172,16 +193,16 @@ fn swagger_html() -> String {
     r#"<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>Swagger UI - RustAPI</title>
-  <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui.css" />
+<meta charset="utf-8" />
+<title>Swagger UI - RustAPI</title>
+<link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui.css" />
 </head>
 <body>
-  <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-bundle.js"></script>
-  <script>
+<div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-bundle.js"></script>
+<script>
     window.onload = () => { window.ui = SwaggerUIBundle({ url: '/openapi.json', dom_id: '#swagger-ui' }); };
-  </script>
+</script>
 </body>
 </html>"#.to_string()
 }
@@ -192,14 +213,16 @@ struct PyRequest {
     #[pyo3(get)] path: String,
     #[pyo3(get)] path_params: HashMap<String, String>,
     #[pyo3(get)] query_params: HashMap<String, String>,
+    #[pyo3(get)] headers: HashMap<String, String>,
+    #[pyo3(get)] cookies: HashMap<String, String>,
     #[pyo3(get)] body: String,
 }
 
 #[pymethods]
 impl PyRequest {
     #[new]
-    fn new(method: String, path: String, path_params: HashMap<String, String>, query_params: HashMap<String, String>, body: String) -> Self {
-        PyRequest { method, path, path_params, query_params, body }
+    fn new(method: String, path: String, path_params: HashMap<String, String>, query_params: HashMap<String, String>, headers: HashMap<String, String>, cookies: HashMap<String, String>, body: String) -> Self {
+        PyRequest { method, path, path_params, query_params, headers, cookies, body }
     }
 
     fn json(&self, py: Python<'_>) -> PyResult<PyObject> {
@@ -207,9 +230,39 @@ impl PyRequest {
     }
 }
 
+#[pyclass(name = "Response")]
+struct PyResponse {
+    #[pyo3(get)] content: PyObject,
+    #[pyo3(get)] status_code: u16,
+    #[pyo3(get)] headers: HashMap<String, String>,
+}
+
+impl Clone for PyResponse {
+    fn clone(&self) -> Self {
+        Python::with_gil(|py| PyResponse {
+            content: self.content.clone_ref(py),
+            status_code: self.status_code,
+            headers: self.headers.clone(),
+        })
+    }
+}
+
+#[pymethods]
+impl PyResponse {
+    #[new]
+    #[pyo3(signature = (content, status_code=200, headers=None))]
+    fn new(content: PyObject, status_code: u16, headers: Option<HashMap<String, String>>) -> Self {
+        PyResponse {
+            content,
+            status_code,
+            headers: headers.unwrap_or_default(),
+        }
+    }
+}
+
 #[pyclass]
 struct CoroCallback {
-    tx: std::sync::Mutex<Option<oneshot::Sender<Result<PyObject, String>>>>,
+    tx: std::sync::Mutex<Option<oneshot::Sender<Result<PyObject, PyObject>>>>,
 }
 
 #[pymethods]
@@ -220,7 +273,7 @@ impl CoroCallback {
             if error.is_none(py) {
                 let _ = tx.send(Ok(result));
             } else {
-                let _ = tx.send(Err(error.to_string()));
+                let _ = tx.send(Err(error));
             }
         }
     }
@@ -263,7 +316,7 @@ def _schedule_coro(coro, callback):
             res = fut.result()
             callback(res, None)
         except Exception as e:
-            callback(None, str(e))
+            callback(None, e)
     fut = asyncio.run_coroutine_threadsafe(coro, _engine_loop)
     fut.add_done_callback(done_cb)
 
@@ -314,6 +367,9 @@ def _schema_from_signature(func):
     fn post(&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "POST".into(), path } }
     fn put(&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "PUT".into(), path } }
     fn delete(&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "DELETE".into(), path } }
+    fn options(&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "OPTIONS".into(), path } }
+    fn patch(&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "PATCH".into(), path } }
+    fn head(&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "HEAD".into(), path } }
 
     #[pyo3(signature = (name=None, description=None))]
     fn tool(&self, py: Python<'_>, name: Option<String>, description: Option<String>) -> ToolDecorator {
@@ -335,9 +391,6 @@ def _schema_from_signature(func):
         let is_worker = std::env::var("RUSTAPI_WORKER").is_ok();
         let safe_workers = if workers < 1 { 1 } else { workers };
 
-        // ==========================================
-        // 1. MASTER PROCESS MANAGER (Scaling & Reload)
-        // ==========================================
         if (reload || safe_workers > 1) && !is_worker {
             println!("🚀 Starting Master process (PID {}) spanning {} worker(s)...", std::process::id(), safe_workers);
             if reload {
@@ -374,7 +427,6 @@ def _schema_from_signature(func):
                 };
 
                 loop {
-                    // Handle file reloads
                     if reload {
                         if let Ok(Ok(event)) = rx.recv_timeout(Duration::from_millis(250)) {
                             if event.paths.iter().any(|p| p.extension().map_or(false, |ext| ext == "py")) {
@@ -391,7 +443,6 @@ def _schema_from_signature(func):
                         thread::sleep(Duration::from_millis(250));
                     }
 
-                    // Handle Ctrl+C (Graceful Shutdown)
                     if let Err(e) = Python::with_gil(|py| py.check_signals()) {
                         for mut child in children {
                             let _ = child.kill();
@@ -413,9 +464,6 @@ def _schema_from_signature(func):
             return Ok(());
         }
 
-        // ==========================================
-        // 2. WORKER PROCESS (HTTP Server)
-        // ==========================================
         let worker_id = std::env::var("RUSTAPI_WORKER").unwrap_or_else(|_| "0".to_string());
         
         let routes = self.routes.clone();
@@ -427,18 +475,17 @@ def _schema_from_signature(func):
         
         let addr: SocketAddr = format!("{host}:{port}").parse().unwrap();
         
-        // Advanced OS-level socket configuration (SO_REUSEPORT)
         let domain = if addr.is_ipv4() { socket2::Domain::IPV4 } else { socket2::Domain::IPV6 };
         let socket = socket2::Socket::new(domain, socket2::Type::STREAM, None).unwrap();
         socket.set_reuse_address(true).unwrap();
-        #[cfg(unix)] // macOS and Linux strictly require this to share ports
+        #[cfg(unix)]
         socket.set_reuse_port(true).unwrap();
         
         socket.bind(&addr.into()).unwrap();
         socket.listen(1024).unwrap();
         
         let std_listener: std::net::TcpListener = socket.into();
-        std_listener.set_nonblocking(true).unwrap(); // Required for Tokio conversion
+        std_listener.set_nonblocking(true).unwrap();
 
         if worker_id == "0" {
             println!("🚀 rustapi listening on http://{addr}");
@@ -447,8 +494,16 @@ def _schema_from_signature(func):
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let (done_tx, done_rx) = mpsc::channel::<()>();
 
+        let num_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let gil_semaphore = Arc::new(Semaphore::new(num_cpus * 2));
+
         let server_handle = thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().expect("failed to build tokio runtime");
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .max_blocking_threads(num_cpus * 4)
+                .build()
+                .expect("failed to build tokio runtime");
+
             rt.block_on(async move {
                 let make_svc = make_service_fn(move |_conn| {
                     let routes = routes.clone();
@@ -457,17 +512,21 @@ def _schema_from_signature(func):
                     let prompts = prompts.clone();
                     let serializer = serializer_arc.clone();
                     let schedule_coro = schedule_coro_arc.clone();
+                    let sem = gil_semaphore.clone();
 
                     async move {
                         Ok::<_, Infallible>(service_fn(move |req| handle(
                             req, routes.clone(), serializer.clone(), schedule_coro.clone(),
-                            tools.clone(), resources.clone(), prompts.clone(),
+                            tools.clone(), resources.clone(), prompts.clone(), sem.clone(),
                         )))
                     }
                 });
 
-                // Feed our specialized SO_REUSEPORT socket into Hyper
-                let server = Server::from_tcp(std_listener).unwrap().serve(make_svc);
+                let server = Server::from_tcp(std_listener).unwrap()
+                    .http1_keepalive(true)
+                    .tcp_nodelay(true)
+                    .serve(make_svc);
+                    
                 let graceful = server.with_graceful_shutdown(async { let _ = shutdown_rx.await; });
                 if let Err(e) = graceful.await { eprintln!("Server error: {e}"); }
             });
@@ -502,13 +561,31 @@ async fn handle(
     tools: Tools,
     resources: Resources,
     prompts: Prompts,
+    gil_sem: Arc<Semaphore>,
 ) -> Result<HyperResponse<Body>, Infallible> {
     let start_time = Instant::now();
     
-    // Extract variables early so req can be safely consumed by into_body()
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
     let query_params = parse_query(req.uri().query());
+
+    let mut headers_map = HashMap::new();
+    let mut cookies_map = HashMap::new();
+    
+    for (k, v) in req.headers() {
+        let key_str = k.as_str().to_string();
+        let val_str = v.to_str().unwrap_or("").to_string();
+        
+        if key_str.eq_ignore_ascii_case("cookie") {
+            for pair in val_str.split(';') {
+                let mut parts = pair.trim().splitn(2, '=');
+                if let (Some(ck), Some(cv)) = (parts.next(), parts.next()) {
+                    cookies_map.insert(ck.to_string(), cv.to_string());
+                }
+            }
+        }
+        headers_map.insert(key_str, val_str);
+    }
 
     let mut body_bytes = Vec::new();
     let mut body_stream = req.into_body();
@@ -521,11 +598,13 @@ async fn handle(
     }
     let body = String::from_utf8_lossy(&body_bytes).to_string();
 
-    let (status, resp_body, content_type) = if method == "GET" && path == "/docs" {
-        (200, swagger_html(), "text/html")
+    let (status, resp_body, resp_headers) = if method == "GET" && path == "/docs" {
+        let mut h = HashMap::new(); h.insert("Content-Type".to_string(), "text/html".to_string());
+        (200, swagger_html(), h)
     } else if method == "GET" && path == "/openapi.json" {
         let spec = { let guard = routes.lock().unwrap(); generate_openapi(&guard) };
-        (200, spec, "application/json")
+        let mut h = HashMap::new(); h.insert("Content-Type".to_string(), "application/json".to_string());
+        (200, spec, h)
     } else if method == "POST" && path == "/mcp" {
         let req_json: serde_json::Value = serde_json::from_str(&body).unwrap_or(json!({}));
         let req_method = req_json["method"].as_str().unwrap_or("").to_string();
@@ -537,148 +616,227 @@ async fn handle(
         let err = |code: i32, msg: &str| -> String { json!({"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": msg}}).to_string() };
 
         let result = if !has_id {
-            // JSON-RPC notification (no "id" member) - must never receive a response,
-            // regardless of whether the method is recognized.
             String::new()
         } else if req_method == "initialize" {
-            ok(json!({
-                "protocolVersion": "2025-06-18",
-                "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
-                "serverInfo": {"name": "rustapi-mcp", "version": "0.1.0"}
-            }))
+            ok(json!({"protocolVersion": "2025-06-18", "capabilities": {"tools": {}, "resources": {}, "prompts": {}}, "serverInfo": {"name": "rustapi-mcp", "version": "0.1.0"}}))
         } else if req_method == "notifications/initialized" || req_method == "initialized" {
             String::new()
         } else if req_method == "ping" {
             ok(json!({}))
         } else if req_method == "tools/list" {
             let guard = tools.lock().unwrap();
-            let items: Vec<_> = guard.iter().map(|t| {
-                json!({ "name": t.name, "description": t.description, "inputSchema": t.schema_json })
-            }).collect();
+            let items: Vec<_> = guard.iter().map(|t| json!({ "name": t.name, "description": t.description, "inputSchema": t.schema_json })).collect();
             ok(json!({"tools": items}))
         } else if req_method == "resources/list" {
             let guard = resources.lock().unwrap();
-            let items: Vec<_> = guard.iter().map(|r| {
-                json!({ "uri": r.uri, "name": r.description, "mimeType": r.mime_type })
-            }).collect();
+            let items: Vec<_> = guard.iter().map(|r| json!({ "uri": r.uri, "name": r.description, "mimeType": r.mime_type })).collect();
             ok(json!({"resources": items}))
         } else if req_method == "prompts/list" {
             let guard = prompts.lock().unwrap();
-            let items: Vec<_> = guard.iter().map(|p| {
-                json!({ "name": p.name, "description": p.description, "arguments": [] })
-            }).collect();
+            let items: Vec<_> = guard.iter().map(|p| json!({ "name": p.name, "description": p.description, "arguments": [] })).collect();
             ok(json!({"prompts": items}))
         } else if req_method == "tools/call" {
             let name = params["name"].as_str().unwrap_or("").to_string();
             let args_json = params["arguments"].clone();
-            
-            let tool_opt = Python::with_gil(|py| {
-                let guard = tools.lock().unwrap();
-                guard.iter().find(|t| t.name == name).map(|t| (t.handler.clone_ref(py), t.is_async))
-            });
+            let tool_opt = Python::with_gil(|py| tools.lock().unwrap().iter().find(|t| t.name == name).map(|t| (t.handler.clone_ref(py), t.is_async)));
 
             if let Some((handler, is_async)) = tool_opt {
+                let _permit = gil_sem.acquire().await.ok();
                 let exec_res: PyResult<PyObject> = tokio::task::spawn_blocking(move || {
                     Python::with_gil(|py| -> PyResult<PyObject> {
                         let kwargs = py.import_bound("json")?.call_method1("loads", (args_json.to_string(),))?;
-                        if let Ok(dict) = kwargs.downcast::<PyDict>() {
-                            handler.bind(py).call((), Some(dict)).map(|v| v.into())
-                        } else {
-                            handler.bind(py).call0().map(|v| v.into())
-                        }
+                        if let Ok(dict) = kwargs.downcast::<PyDict>() { handler.bind(py).call((), Some(dict)).map(|v| v.into()) } else { handler.bind(py).call0().map(|v| v.into()) }
                     })
                 }).await.unwrap_or_else(|e| Err(pyo3::exceptions::PyRuntimeError::new_err(format!("worker thread panicked: {e}"))));
-                execute_python_handler(exec_res, is_async, &serializer, &schedule_coro, true).await
-                    .map(|s| ok(json!({"content": [{"type": "text", "text": s}], "isError": false})))
-                    .unwrap_or_else(|e| ok(json!({"content": [{"type": "text", "text": e}], "isError": true})))
+                
+                let (t_status, content, _) = execute_python_handler(exec_res, is_async, &serializer, &schedule_coro, true).await;
+                if t_status < 400 { ok(json!({"content": [{"type": "text", "text": content}], "isError": false})) } else { ok(json!({"content": [{"type": "text", "text": content}], "isError": true})) }
             } else { err(-32602, &format!("Unknown tool: {}", name)) }
         } else if req_method == "resources/read" {
             let uri = params["uri"].as_str().unwrap_or("").to_string();
-            let res_opt = Python::with_gil(|py| {
-                let guard = resources.lock().unwrap();
-                guard.iter().find(|r| r.uri == uri).map(|r| (r.handler.clone_ref(py), r.is_async, r.mime_type.clone()))
-            });
+            let res_opt = Python::with_gil(|py| resources.lock().unwrap().iter().find(|r| r.uri == uri).map(|r| (r.handler.clone_ref(py), r.is_async, r.mime_type.clone())));
             if let Some((handler, is_async, mime)) = res_opt {
-                let exec_res: PyResult<PyObject> = tokio::task::spawn_blocking(move || {
-                    Python::with_gil(|py| handler.call0(py))
-                }).await.unwrap_or_else(|e| Err(pyo3::exceptions::PyRuntimeError::new_err(format!("worker thread panicked: {e}"))));
-                execute_python_handler(exec_res, is_async, &serializer, &schedule_coro, true).await
-                    .map(|s| ok(json!({"contents": [{"uri": uri, "mimeType": mime, "text": s}]})))
-                    .unwrap_or_else(|e| err(-32603, &e))
+                let _permit = gil_sem.acquire().await.ok();
+                let exec_res: PyResult<PyObject> = tokio::task::spawn_blocking(move || Python::with_gil(|py| handler.call0(py))).await.unwrap_or_else(|e| Err(pyo3::exceptions::PyRuntimeError::new_err(format!("worker thread panicked: {e}"))));
+                let (t_status, content, _) = execute_python_handler(exec_res, is_async, &serializer, &schedule_coro, true).await;
+                if t_status < 400 { ok(json!({"contents": [{"uri": uri, "mimeType": mime, "text": content}]})) } else { err(-32603, &content) }
             } else { err(-32602, &format!("Unknown resource: {}", uri)) }
         } else if req_method == "prompts/get" {
             let name = params["name"].as_str().unwrap_or("").to_string();
             let args_json = params["arguments"].clone();
-            let pro_opt = Python::with_gil(|py| {
-                let guard = prompts.lock().unwrap();
-                guard.iter().find(|p| p.name == name).map(|p| (p.handler.clone_ref(py), p.is_async))
-            });
+            let pro_opt = Python::with_gil(|py| prompts.lock().unwrap().iter().find(|p| p.name == name).map(|p| (p.handler.clone_ref(py), p.is_async)));
             if let Some((handler, is_async)) = pro_opt {
+                let _permit = gil_sem.acquire().await.ok();
                 let exec_res: PyResult<PyObject> = tokio::task::spawn_blocking(move || {
                     Python::with_gil(|py| -> PyResult<PyObject> {
                         let kwargs = py.import_bound("json")?.call_method1("loads", (args_json.to_string(),))?;
-                        if let Ok(dict) = kwargs.downcast::<PyDict>() {
-                            handler.bind(py).call((), Some(dict)).map(|v| v.into())
-                        } else {
-                            handler.bind(py).call0().map(|v| v.into())
-                        }
+                        if let Ok(dict) = kwargs.downcast::<PyDict>() { handler.bind(py).call((), Some(dict)).map(|v| v.into()) } else { handler.bind(py).call0().map(|v| v.into()) }
                     })
                 }).await.unwrap_or_else(|e| Err(pyo3::exceptions::PyRuntimeError::new_err(format!("worker thread panicked: {e}"))));
-                execute_python_handler(exec_res, is_async, &serializer, &schedule_coro, true).await
-                    .map(|s| ok(json!({"messages": [{"role": "user", "content": {"type": "text", "text": s}}]})))
-                    .unwrap_or_else(|e| err(-32603, &e))
+                let (t_status, content, _) = execute_python_handler(exec_res, is_async, &serializer, &schedule_coro, true).await;
+                if t_status < 400 { ok(json!({"messages": [{"role": "user", "content": {"type": "text", "text": content}}]})) } else { err(-32603, &content) }
             } else { err(-32602, &format!("Unknown prompt: {}", name)) }
-        } else {
-            err(-32601, &format!("Method not found: {}", req_method))
-        };
+        } else { err(-32601, &format!("Method not found: {}", req_method)) };
 
-        if result.is_empty() { (202, result, "application/json") } else { (200, result, "application/json") }
-
+        let mut h = HashMap::new(); h.insert("Content-Type".to_string(), "application/json".to_string());
+        if result.is_empty() { (202, result, h) } else { (200, result, h) }
     } else {
         let matched = { let guard = routes.lock().unwrap(); match_route(&guard, &method, &path) };
 
         match matched {
             Some((idx, path_params)) => {
-                let (handler, param_count, is_async, pydantic_model) = Python::with_gil(|py| {
+                let (handler, is_async, pydantic_model, pydantic_param_name, request_param_name, deps) = Python::with_gil(|py| {
                     let guard = routes.lock().unwrap();
                     let entry = &guard[idx];
-                    (entry.handler.clone_ref(py), entry.param_count, entry.is_async, entry.pydantic_model.as_ref().map(|m| m.clone_ref(py)))
+                    (
+                        entry.handler.clone_ref(py),
+                        entry.is_async,
+                        entry.pydantic_model.as_ref().map(|m| m.clone_ref(py)),
+                        entry.pydantic_param_name.clone(),
+                        entry.request_param_name.clone(),
+                        entry.dependencies.clone()
+                    )
                 });
 
                 let method_c = method.clone();
                 let path_c = path.clone();
                 let body_c = body.clone();
+                let headers_c = headers_map.clone();
+                let cookies_c = cookies_map.clone();
+                let path_params_c = path_params.clone();
+                let mut dependency_error: Option<String> = None;
 
-                // Actually invoking the handler runs arbitrary Python (sync handlers execute
-                // their full body here) - must happen off the tokio reactor thread, or one
-                // slow/blocking handler stalls every other in-flight request on this worker.
+                let mut resolved_args: HashMap<String, PyObject> = HashMap::new();
+                let mut cache: HashMap<isize, PyObject> = HashMap::new();
+                let mut teardown_generators: Vec<PyObject> = Vec::new();
+
+                for dep in deps {
+                    if dep.use_cache && cache.contains_key(&dep.id) {
+                        let cached_val = Python::with_gil(|py| cache.get(&dep.id).unwrap().clone_ref(py));
+                        resolved_args.insert(dep.name.clone(), cached_val);
+                        continue;
+                    }
+
+                    let dep_result_res: Result<PyObject, String> = if dep.is_async {
+                        let coro_res: Result<PyObject, String> = Python::with_gil(|py| dep.func.call0(py).map(|obj| obj.into()).map_err(|e| e.to_string()));
+                        match coro_res {
+                            Ok(coro) => {
+                                let (tx, rx) = oneshot::channel();
+                                Python::with_gil(|py| {
+                                    if let Ok(cb) = Py::new(py, CoroCallback { tx: Mutex::new(Some(tx)) }) {
+                                        let _ = schedule_coro.bind(py).call1((coro, cb));
+                                    }
+                                });
+                                match rx.await {
+                                    Ok(Ok(res)) => Ok(res),
+                                    Ok(Err(err_obj)) => Err(Python::with_gil(|py| err_obj.bind(py).to_string())),
+                                    Err(_) => Err("Asyncio channel dropped".to_string()),
+                                }
+                            }
+                            Err(e) => Err(e),
+                        }
+                    } else {
+                        let sem_clone = gil_sem.clone();
+                        let dep_func = Python::with_gil(|py| dep.func.clone_ref(py));
+                        tokio::task::spawn_blocking(move || {
+                            let _permit = sem_clone.try_acquire().ok();
+                            Python::with_gil(|py| dep_func.call0(py).map(|obj| obj.into()).map_err(|e| e.to_string()))
+                        }).await.unwrap_or_else(|_| Err("Worker thread panicked".to_string()))
+                    };
+
+                    match dep_result_res {
+                        Ok(dep_obj) => {
+                            let val_res: Result<PyObject, String> = Python::with_gil(|py| {
+                                if dep.is_generator {
+                                    let builtins = py.import_bound("builtins").map_err(|e| e.to_string())?;
+                                    let val = builtins.call_method1("next", (&dep_obj,)).map_err(|e| e.to_string())?.into();
+                                    Ok(val)
+                                } else {
+                                    Ok(dep_obj.clone_ref(py))
+                                }
+                            });
+
+                            match val_res {
+                                Ok(val) => {
+                                    if dep.is_generator { teardown_generators.push(dep_obj); }
+                                    if dep.use_cache { cache.insert(dep.id, Python::with_gil(|py| val.clone_ref(py))); }
+                                    resolved_args.insert(dep.name, val);
+                                }
+                                Err(e) => { dependency_error = Some(e); break; }
+                            }
+                        }
+                        Err(e) => { dependency_error = Some(e); break; }
+                    }
+                }
+
+                if let Some(err_msg) = dependency_error {
+                    let mut h = HashMap::new(); h.insert("Content-Type".to_string(), "application/json".to_string());
+                    return Ok(HyperResponse::builder().status(500).header("Content-Type", "application/json").body(Body::from(format!(r#"{{"detail":"Dependency Error: {}"}}"#, err_msg.replace('"', "'")))).unwrap());
+                }
+
+                let sem_clone = gil_sem.clone();
                 let exec_res: PyResult<PyObject> = tokio::task::spawn_blocking(move || {
+                    let _permit = sem_clone.try_acquire().ok();
                     Python::with_gil(|py| -> PyResult<PyObject> {
-                        if param_count == 0 {
-                            handler.call0(py)
-                        } else if let Some(ref model) = pydantic_model {
+                        
+                        let kwargs = pyo3::types::PyDict::new_bound(py);
+                        
+                        for (k, v) in &path_params_c {
+                            kwargs.set_item(k, v)?;
+                        }
+                        for (k, v) in resolved_args {
+                            kwargs.set_item(k, v)?;
+                        }
+
+                        if let Some(req_name) = request_param_name {
+                            let req_obj = Py::new(py, PyRequest { method: method_c, path: path_c, path_params: path_params_c, query_params, headers: headers_c, cookies: cookies_c, body: body_c.clone() })?;
+                            kwargs.set_item(req_name, req_obj)?;
+                        }
+
+                        if let Some(ref model) = pydantic_model {
                             let py_dict = if body_c.is_empty() { pyo3::types::PyDict::new_bound(py).into_any() }
                             else { py.import_bound("json")?.call_method1("loads", (&body_c,))?.into_any() };
                             let instance = model.bind(py).call_method1("model_validate", (py_dict,))?;
-                            handler.call1(py, (instance,))
-                        } else {
-                            let req_obj = Py::new(py, PyRequest { method: method_c, path: path_c, path_params, query_params, body: body_c })?;
-                            handler.call1(py, (req_obj,))
+                            if let Some(model_name) = pydantic_param_name {
+                                kwargs.set_item(model_name, instance)?;
+                            }
                         }
+
+                        handler.bind(py).call((), Some(&kwargs)).map(|v| v.into())
                     })
                 }).await.unwrap_or_else(|e| Err(pyo3::exceptions::PyRuntimeError::new_err(format!("worker thread panicked: {e}"))));
 
-                match execute_python_handler(exec_res, is_async, &serializer, &schedule_coro, false).await {
-                    Ok(s) => (200, s, "application/json"),
-                    Err(e) => (500, format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")), "application/json"),
+                let (r_status, r_body, mut r_headers) = execute_python_handler(exec_res, is_async, &serializer, &schedule_coro, false).await;
+                if !r_headers.keys().any(|k| k.eq_ignore_ascii_case("content-type")) {
+                    r_headers.insert("Content-Type".to_string(), "application/json".to_string());
                 }
+
+                if !teardown_generators.is_empty() {
+                    tokio::task::spawn_blocking(move || {
+                        Python::with_gil(|py| {
+                            if let Ok(builtins) = py.import_bound("builtins") {
+                                for gen in teardown_generators {
+                                    let _ = builtins.call_method1("next", (&gen,)); 
+                                }
+                            }
+                        });
+                    });
+                }
+
+                (r_status, r_body, r_headers)
             }
-            None => (404, r#"{"error":"not found"}"#.to_string(), "application/json"),
+            None => {
+                let mut h = HashMap::new(); h.insert("Content-Type".to_string(), "application/json".to_string());
+                (404, r#"{"detail":"Not Found"}"#.to_string(), h)
+            }
         }
     };
 
+    let mut builder = HyperResponse::builder().status(status);
+    for (k, v) in resp_headers { builder = builder.header(&k, &v); }
+
     println!("[INFO] {} {} - {} ({}ms)", method, path, status, start_time.elapsed().as_millis());
-    Ok(HyperResponse::builder().status(status).header("Content-Type", content_type).body(Body::from(resp_body)).unwrap())
+    Ok(builder.body(Body::from(resp_body)).unwrap())
 }
 
 async fn execute_python_handler(
@@ -687,44 +845,106 @@ async fn execute_python_handler(
     serializer: &PyObject, 
     schedule_coro: &PyObject,
     raw_string: bool,
-) -> Result<String, String> {
-    if is_async {
-        let (tx, rx) = oneshot::channel();
-        let spawn_res = Python::with_gil(|py| -> PyResult<()> {
-            let coro = exec_res?;
-            let cb = Py::new(py, CoroCallback { tx: Mutex::new(Some(tx)) })?;
-            schedule_coro.bind(py).call1((coro, cb))?;
-            Ok(())
-        });
-        if let Err(e) = spawn_res { return Err(e.to_string()); }
-        
-        let result_obj = rx.await.map_err(|_| "Asyncio channel dropped".to_string())??;
-        Python::with_gil(|py| -> PyResult<String> {
-            if raw_string {
-                if result_obj.is_none(py) { Ok(String::new()) }
-                else if let Ok(s) = result_obj.downcast_bound::<PyString>(py) { Ok(s.to_string()) }
-                else { serializer.bind(py).call1((result_obj,))?.extract() }
-            } else {
-                // HTTP routes: always run through the JSON serializer, even for None/str,
-                // so the response body is always valid JSON (matches FastAPI semantics).
-                serializer.bind(py).call1((result_obj,))?.extract()
+) -> (u16, String, HashMap<String, String>) {
+    
+    let py_result: PyResult<PyObject> = if is_async {
+        match exec_res {
+            Ok(coro) => {
+                let (tx, rx) = oneshot::channel();
+                let spawn_res = Python::with_gil(|py| -> PyResult<()> {
+                    let cb = Py::new(py, CoroCallback { tx: Mutex::new(Some(tx)) })?;
+                    schedule_coro.bind(py).call1((coro, cb))?;
+                    Ok(())
+                });
+                if let Err(e) = spawn_res { Err(e) } else {
+                    match rx.await {
+                        Ok(Ok(res)) => Ok(res),
+                        Ok(Err(err_obj)) => Python::with_gil(|py| Err(PyErr::from_value_bound(err_obj.into_bound(py)))),
+                        Err(_) => Python::with_gil(|_py| Err(pyo3::exceptions::PyRuntimeError::new_err("Asyncio channel dropped"))),
+                    }
+                }
             }
-        }).map_err(|e| e.to_string())
+            Err(e) => Err(e),
+        }
     } else {
-        let py_obj = exec_res.map_err(|e| e.to_string())?;
-        Python::with_gil(|py| -> PyResult<String> {
-            if raw_string {
-                if py_obj.is_none(py) { Ok(String::new()) }
-                else if let Ok(s) = py_obj.downcast_bound::<PyString>(py) { Ok(s.to_string()) }
-                else { serializer.bind(py).call1((py_obj,))?.extract() }
-            } else {
-                serializer.bind(py).call1((py_obj,))?.extract()
-            }
-        }).map_err(|e| e.to_string())
-    }
-}
+        exec_res
+    };
 
-// ---------- Decorators ----------
+    Python::with_gil(|py| -> (u16, String, HashMap<String, String>) {
+        match py_result {
+            Ok(py_obj) => {
+                if let Ok(resp) = py_obj.downcast_bound::<PyResponse>(py) {
+                    let resp_ref = resp.borrow();
+                    let status = resp_ref.status_code;
+                    let headers = resp_ref.headers.clone();
+                    
+                    let body_str = if raw_string {
+                        if resp_ref.content.is_none(py) { String::new() }
+                        else if let Ok(s) = resp_ref.content.downcast_bound::<PyString>(py) { s.to_string() }
+                        else { serializer.bind(py).call1((&resp_ref.content,)).unwrap().extract().unwrap_or_default() }
+                    } else {
+                        serializer.bind(py).call1((&resp_ref.content,)).unwrap().extract().unwrap_or_default()
+                    };
+                    return (status, body_str, headers);
+                }
+                
+                let body_str = if raw_string {
+                    if py_obj.is_none(py) { String::new() }
+                    else if let Ok(s) = py_obj.downcast_bound::<PyString>(py) { s.to_string() }
+                    else { serializer.bind(py).call1((py_obj,)).unwrap().extract().unwrap_or_default() }
+                } else {
+                    serializer.bind(py).call1((py_obj,)).unwrap().extract().unwrap_or_default()
+                };
+                (200, body_str, HashMap::new())
+            }
+            Err(err) => {
+                let val = err.value_bound(py);
+                
+                if let Ok(pydantic) = py.import_bound("pydantic") {
+                    if let Ok(val_err) = pydantic.getattr("ValidationError") {
+                        if val.is_instance(&val_err).unwrap_or(false) {
+                            if let Ok(errors) = val.call_method0("errors") {
+                                let dict = PyDict::new_bound(py);
+                                let _ = dict.set_item("detail", errors);
+                                if let Ok(json) = py.import_bound("json") {
+                                    if let Ok(dumps) = json.getattr("dumps") {
+                                        if let Ok(err_str) = dumps.call1((dict,)) {
+                                            return (422, err_str.extract().unwrap_or_default(), HashMap::new());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                if val.hasattr("status_code").unwrap_or(false) && val.hasattr("detail").unwrap_or(false) {
+                    let status_code: u16 = val.getattr("status_code").and_then(|v| v.extract()).unwrap_or(500);
+                    let detail = val.getattr("detail").unwrap_or_else(|_| py.None().into_bound(py));
+                    
+                    let dict = PyDict::new_bound(py);
+                    let _ = dict.set_item("detail", detail);
+                    let err_str = py.import_bound("json").and_then(|j| j.getattr("dumps")).and_then(|d| d.call1((dict,)))
+                        .and_then(|s| s.extract::<String>()).unwrap_or_else(|_| r#"{"detail":"Internal Error"}"#.to_string());
+                        
+                    let mut headers = HashMap::new();
+                    if let Ok(h) = val.getattr("headers") {
+                        if let Ok(h_dict) = h.downcast::<PyDict>() {
+                            for (k, v) in h_dict {
+                                if let (Ok(ks), Ok(vs)) = (k.extract::<String>(), v.extract::<String>()) {
+                                    headers.insert(ks, vs);
+                                }
+                            }
+                        }
+                    }
+                    return (status_code, err_str, headers);
+                }
+                
+                (500, format!(r#"{{"detail":"{}"}}"#, err.to_string().replace('"', "'")), HashMap::new())
+            }
+        }
+    })
+}
 
 #[pyclass]
 struct RouteDecorator { routes: Routes, method: String, path: String }
@@ -737,25 +957,71 @@ impl RouteDecorator {
         let is_async: bool = inspect.getattr("iscoroutinefunction")?.call1((func.bind(py),))?.extract()?;
         let sig = inspect.call_method1("signature", (func.bind(py),))?;
         let params = sig.getattr("parameters")?;
-        let param_count: usize = params.call_method0("__len__")?.extract()?;
 
         let mut pydantic_model = None;
+        let mut pydantic_param_name = None;
         let mut request_schema_json = None;
+        let mut request_param_name = None;
+        let mut dependencies = Vec::new(); 
 
         if let Ok(params_dict) = params.call_method0("values") {
             if let Ok(iter) = params_dict.iter() {
                 for p_res in iter {
                     if let Ok(p) = p_res {
+                        let param_name: String = p.getattr("name")?.extract()?;
+
+                        // Request object binding
+                        if param_name == "req" || param_name == "request" {
+                            request_param_name = Some(param_name);
+                            continue;
+                        }
+
+                        // Pydantic model binding
                         if let Ok(annotation) = p.getattr("annotation") {
                             if annotation.hasattr("model_json_schema").unwrap_or(false) {
                                 pydantic_model = Some(annotation.clone().into());
+                                pydantic_param_name = Some(param_name.clone());
                                 if let Ok(schema_dict) = annotation.call_method0("model_json_schema") {
                                     let json_mod = py.import_bound("json")?;
                                     if let Ok(schema_str) = json_mod.call_method1("dumps", (schema_dict,)) {
                                         if let Ok(s) = schema_str.extract::<String>() { request_schema_json = Some(s); }
                                     }
                                 }
-                                break;
+                                continue; 
+                            }
+                        }
+
+                        // Dependency binding via Python object inspection
+                        if let Ok(default_val) = p.getattr("default") {
+                            let depends_type = py.import_bound("rustapi.depends")?.getattr("Depends")?;
+                            let is_depends = default_val.is_instance(&depends_type).unwrap_or(false);
+
+                            if is_depends {
+                                let dep_func = if let Ok(explicit_dep) = default_val.getattr("dependency") {
+                                    if explicit_dep.is_none() {
+                                        p.getattr("annotation").unwrap_or_else(|_| py.None().into_bound(py))
+                                    } else {
+                                        explicit_dep
+                                    }
+                                } else {
+                                    py.None().into_bound(py)
+                                };
+
+                                if !dep_func.is_none() {
+                                    let is_dep_async = inspect.getattr("iscoroutinefunction")?.call1((&dep_func,))?.extract().unwrap_or(false);
+                                    let is_dep_gen = inspect.getattr("isgeneratorfunction")?.call1((&dep_func,))?.extract().unwrap_or(false);
+                                    let use_cache = default_val.getattr("use_cache")?.extract().unwrap_or(true);
+                                    let dep_id = dep_func.as_ptr() as isize;
+
+                                    dependencies.push(DependencyMeta {
+                                        name: param_name.clone(),
+                                        func: dep_func.into(),
+                                        is_async: is_dep_async,
+                                        is_generator: is_dep_gen,
+                                        use_cache,
+                                        id: dep_id,
+                                    });
+                                }
                             }
                         }
                     }
@@ -764,8 +1030,16 @@ impl RouteDecorator {
         }
 
         self.routes.lock().unwrap().push(RouteEntry {
-            method: self.method.clone(), original_path: self.path.clone(), segments: parse_pattern(&self.path),
-            handler: func.clone_ref(py), param_count, is_async, pydantic_model, request_schema_json,
+            method: self.method.clone(), 
+            original_path: self.path.clone(), 
+            segments: parse_pattern(&self.path),
+            handler: func.clone_ref(py), 
+            is_async, 
+            pydantic_model, 
+            pydantic_param_name,
+            request_schema_json,
+            request_param_name,
+            dependencies,
         });
         Ok(func)
     }
@@ -843,6 +1117,7 @@ fn compute(py: Python<'_>, n: i64) -> PyResult<i64> {
 fn _rustapi(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Engine>()?;
     m.add_class::<PyRequest>()?;
+    m.add_class::<PyResponse>()?;
     m.add_function(wrap_pyfunction!(compute, m)?)?;
     Ok(())
 }

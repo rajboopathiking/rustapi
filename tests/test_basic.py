@@ -323,3 +323,8 @@ def test_mcp_notification_no_response_body():
     assert res.status_code == 202
     assert res.text == ""
     logger.info("✅ [PASSED] Test 18: MCP notification correctly returned no response body.\n")
+
+if __name__ == "__main__":
+    # logger.info("⚠️  Running pytest directly. Use 'pytest -s' to see detailed logs.")
+    # pytest.main(["-s", __file__])
+    app.run(host=HOST, port=PORT, reload=False)

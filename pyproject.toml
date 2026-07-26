@@ -3,7 +3,7 @@ requires = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "rustapi-framework"
+name = "pyrustapi"
 version = "0.1.0"
 description = "A FastAPI-style Python web framework with a Rust tokio/hyper core, and a built-in MCP server."
 readme = "README.md"
