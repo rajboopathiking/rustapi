@@ -1,9 +1,65 @@
-from rustapi import Engine, Response, HTTPException,Depends
+from rustapi import Engine, Response, HTTPException,Depends,BackgroundTasks,WebSocket
 from pydantic import BaseModel
 import asyncio
 import uuid
+from routers_test import router
+import time
 
 app = Engine()
+
+app.include_router(router)  
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    print("🔌 WebSocket client connected!")
+    while True:
+        try:
+            data = await websocket.receive_text()
+            print(f"📩 Received: {data}")
+            await websocket.send_text(f"Echo from RustAPI: {data}")
+        except Exception:
+            break
+
+def process_image(image_id: str, effect: str):
+    print(f"\n🖼️  [Background Task Started] Processing image {image_id} with effect: {effect}...")
+    time.sleep(3) # Simulating heavy CPU lifting (e.g., image resizing)
+    print(f"✅  [Background Task Finished] Image {image_id} complete!\n")
+
+# 2. This is the endpoint that triggers it
+# @app.post("/upload")
+# def upload_file(bg: BackgroundTasks):
+#     print("\n📡 [Route Handler] Handling incoming upload request...")
+    
+#     # Push the task to Tokio's background thread pool natively in Rust
+#     bg.add_task(process_image, "IMG_001.jpg", effect="sepia")
+    
+#     print("🚀 [Route Handler] Returning HTTP Response immediately!")
+#     # Response returns instantly!
+#     return {"message": "Upload successful! Processing in background."}
+
+@app.post("/upload")
+def handle_upload(req):
+    description = req.form.get("description", "No description provided")
+    documents = req.files.get("document", [])
+    
+    if not documents:
+        return {"error": "No file uploaded"}
+        
+    file = documents[0]
+    file_bytes = file.read()
+    
+    return {
+        "message": "File successfully uploaded and parsed by Rust!",
+        "filename": file.filename,
+        "content_type": file.content_type,
+        "size_bytes": len(file_bytes),
+        "form_description": description
+    }
+
+@app.get("/")
+def health_check():
+    return {"status": "Master App is running normally."}
 
 class User(BaseModel):
     name: str
@@ -73,4 +129,7 @@ def auth(req):
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1",port=8000)
+    host = "127.0.0.1"
+    port = 8000
+    print(f"Starting RustAPI server on http://{host}:{port} ...")
+    app.run(host=host, port=port)
