@@ -16,7 +16,7 @@ use notify::{RecursiveMode, Watcher};
 use serde_json::json;
 use tokio::sync::{oneshot, Semaphore};
 
-const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024; // 10 MB limit
+const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024; 
 
 #[derive(Clone)]
 enum Segment {
