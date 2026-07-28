@@ -8,4 +8,4 @@ class HTTPException(Exception):
         self.status_code = status_code
         self.detail = detail
         self.headers = headers or {}
-        super().__init__(detail)
+        super().__init__(f"{status_code}: {detail}")
