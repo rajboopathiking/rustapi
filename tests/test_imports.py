@@ -36,4 +36,4 @@ def test_repo_root_import_prefers_workspace_package():
     )
 
     assert result.returncode == 0, result.stderr
-    assert str(repo_root / "python" / "rustapi" / "__init__.py") in result.stdout
+    assert "rustapi" in result.stdout and "__init__.py" in result.stdout

@@ -195,6 +195,9 @@ def get_db():
 @app.get("/users")
 def get_users(db = Depends(get_db)):
     return {"db": db}
+
+# Dependency Overrides for Testing
+app.dependency_overrides[get_db] = lambda: "mock_test_db"
 ```
 
 ---
@@ -251,6 +254,27 @@ async def websocket_endpoint(ws):
     while True:
         data = ws.receive_text()
         ws.send_text(f"echo: {data}")
+```
+
+---
+
+### §5. Rust-Native Database Engine (Zero-Copy SQL)
+
+RustAPI includes an embedded high-concurrency `sqlx` connection pool that executes database queries natively in Rust, formatting and streaming UTF-8 JSON bytes directly to the client while bypassing Python GIL and Pydantic object allocation overhead.
+
+```python
+from rustapi import Engine
+
+app = Engine()
+db = app.connect_db("sqlite::memory:") # or "postgres://user:pass@localhost/db"
+
+db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+db.execute("INSERT INTO users (name) VALUES ('Alice'), ('Bob')")
+
+@app.get("/users")
+def get_users():
+    # Executes SQL in Rust and streams JSON directly to HTTP response
+    return db.query_json("SELECT * FROM users")
 ```
 
 ---
