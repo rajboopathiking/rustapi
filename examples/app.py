@@ -26,6 +26,14 @@ def search(request):
 def echo(request):
     return {"you_sent": request.body}
 
+@app.get("/stream-test")
+def stream_route():
+    def generator():
+        yield "Hello "
+        yield "from "
+        yield "RustAPI!"
+    return rustapi.StreamingResponse(generator(), media_type="text/plain")
+
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=8000)

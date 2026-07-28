@@ -1,14 +1,60 @@
-# 📚 RustAPI vs FastAPI: Comprehensive Migration & Reference Guide
+# 📚 RustAPI Documentation & Reference Guide
 
-This guide provides a comprehensive documentation and code comparison between **FastAPI** and **RustAPI** for all completed phases (Phases 1, 2, and 5, along with Ground Truth and Advanced I/O features).
+**RustAPI** is a high-performance Python web framework backed by a native Rust (`tokio` / `hyper`) core engine with a built-in Model Context Protocol (MCP) server.
 
 ---
 
-## §0. Ground Truth: Core Engine & Basic Routing
+## 🚀 Key Features
 
-### FastAPI
+- **FastAPI-Compatible Surface**: Familiar syntax with `@app.get()`, `@app.post()`, `@app.websocket()`, and Pydantic model validation.
+- **Rust Core Engine**: Built on Tokio multi-threaded runtime and Hyper HTTP server for maximum performance and low latency.
+- **Async & Sync Handlers**: Supports both standard `def` and `async def` route handlers dispatched off the main loop to prevent thread blocking.
+- **Built-in MCP Server**: Exposes Model Context Protocol tools, resources, and prompts at `POST /mcp` (JSON-RPC 2.0).
+- **Auto OpenAPI & Swagger UI**: Serves interactive Swagger docs at `/docs` and raw OpenAPI schemas at `/openapi.json`.
+- **Advanced I/O & Streaming**: Native chunked `StreamingResponse`, multipart `UploadFile` support, and full-duplex `WebSocket` connections.
+- **Production Ergonomics**: Modular `APIRouter`, lifecycle hooks (`startup`, `shutdown`), multi-worker process management (`workers=N`), and auto-reloader (`reload=True`).
+
+---
+
+## 📖 Quick Start
+
+```python
+from rustapi import Engine
+from pydantic import BaseModel
+
+app = Engine()
+
+class Item(BaseModel):
+    name: str
+    price: float
+
+@app.get("/")
+def root():
+    return {"message": "Welcome to RustAPI!"}
+
+@app.post("/items")
+def create_item(item: Item):
+    return {"name": item.name, "price": item.price}
+
+@app.tool()
+def add_numbers(a: int, b: int) -> int:
+    """Add two numbers (Exposed via MCP server at /mcp)."""
+    return a + b
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=8000, reload=True)
+```
+
+---
+
+## ⚡ FastAPI vs RustAPI: Migration & Comparison Guide
+
+### §1. Core Engine & Basic Routing
+
+#### FastAPI
 ```python
 from fastapi import FastAPI
+import asyncio
 
 app = FastAPI()
 
@@ -22,17 +68,16 @@ def sync_route():
 
 @app.get("/async")
 async def async_route():
+    await asyncio.sleep(0.1)
     return {"type": "async"}
-
 ```
 
-### RustAPI
-
+#### RustAPI
 ```python
-import rustapi
+from rustapi import Engine
 import asyncio
 
-app = rustapi.Engine()
+app = Engine()
 
 @app.get("/")
 def root():
@@ -49,15 +94,13 @@ async def async_route():
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=8000)
-
 ```
 
 ---
 
-## §1. Phase 1: HTTP Metadata, Error Handling & Validation
+### §2. Request Metadata, Custom Responses & Error Handling
 
-### FastAPI
-
+#### FastAPI
 ```python
 from fastapi import FastAPI, Request, Response, HTTPException
 from pydantic import BaseModel
@@ -75,24 +118,22 @@ def inspect_req(req: Request):
 @app.get("/custom-resp")
 def custom_resp(response: Response):
     response.status_code = 201
-    response.headers["X-Custom"] = "Value"
+    response.headers["X-Custom"] = "Header-Value"
     return {"status": "created"}
 
 @app.post("/items")
 def create_item(item: Item):
     if item.price < 0:
-        raise HTTPException(status_code=400, detail="Invalid price")
+        raise HTTPException(status_code=400, detail="Price must be non-negative")
     return item
-
 ```
 
-### RustAPI
-
+#### RustAPI
 ```python
-import rustapi
+from rustapi import Engine, Response, HTTPException
 from pydantic import BaseModel
 
-app = rustapi.Engine()
+app = Engine()
 
 class Item(BaseModel):
     name: str
@@ -100,25 +141,29 @@ class Item(BaseModel):
 
 @app.get("/inspect")
 def inspect_req(req):
-    return {"user-agent": req.headers.get("user-agent"), "cookie": req.cookies.get("session")}
+    return {
+        "user-agent": req.headers.get("user-agent"),
+        "path_params": req.path_params,
+        "query_params": req.query_params,
+    }
 
 @app.get("/custom-resp")
 def custom_resp():
     # Return explicit rustapi.Response object
-    return rustapi.Response({"status": "created"}, status_code=201, headers={"X-Custom": "Value"})
+    return Response({"status": "created"}, status_code=201, headers={"X-Custom": "Header-Value"})
 
 @app.post("/items")
 def create_item(item: Item):
-    return item # Automatic Pydantic model validation & 422 error serialization
-
+    if item.price < 0:
+        raise HTTPException(status_code=400, detail="Price must be non-negative")
+    return item # Automatic Pydantic model validation & 422 error handling
 ```
 
 ---
 
-## §2. Phase 2: Dependency Injection & Generators
+### §3. Dependency Injection & Generator Teardowns
 
-### FastAPI
-
+#### FastAPI
 ```python
 from fastapi import FastAPI, Depends
 
@@ -126,43 +171,97 @@ app = FastAPI()
 
 def get_db():
     db = "active_db_connection"
-    yield db
-    # Teardown logic here (e.g., db.close())
+    try:
+        yield db
+    finally:
+        pass # Cleanup logic
 
 @app.get("/users")
 def get_users(db = Depends(get_db)):
     return {"db": db}
-
 ```
 
-### RustAPI
-
+#### RustAPI
 ```python
-import rustapi
+from rustapi import Engine, Depends
 
-app = rustapi.Engine()
+app = Engine()
 
 def get_db():
-    yield "active_db_connection"
-    # Automatic C-managed generator teardown called after response transmission
+    db = "active_db_connection"
+    yield db
+    # Generator teardown is automatically executed post-response transmission
 
 @app.get("/users")
-def get_users(db = rustapi.Depends(get_db)):
+def get_users(db = Depends(get_db)):
     return {"db": db}
-
 ```
 
 ---
 
-## §3. Phase 5: Production Ergonomics (APIRouter & Lifespan Hooks)
+### §4. Advanced I/O: Streaming, File Uploads & WebSockets
 
-### FastAPI
-
+#### FastAPI
 ```python
-from fastapi import FastAPI, APIRouter, FastAPI
+from fastapi import FastAPI, UploadFile, File, Form, WebSocket
+from fastapi.responses import StreamingResponse
 
-app = FastAPI(title="App")
+app = FastAPI()
 
+@app.get("/stream")
+def stream():
+    def generate():
+        yield "chunk 1\n"
+        yield "chunk 2\n"
+    return StreamingResponse(generate(), media_type="text/plain")
+
+@app.post("/upload")
+def upload(document: UploadFile = File(...), description: str = Form(...)):
+    return {"filename": document.filename, "description": description}
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    while True:
+        data = await websocket.receive_text()
+        await websocket.send_text(f"echo: {data}")
+```
+
+#### RustAPI
+```python
+from rustapi import Engine, StreamingResponse
+
+app = Engine()
+
+@app.get("/stream")
+def stream():
+    def generate():
+        yield "chunk 1\n"
+        yield "chunk 2\n"
+    return StreamingResponse(generate(), media_type="text/plain")
+
+@app.post("/upload")
+def upload(req):
+    doc = req.files["document"][0]
+    content = doc.read().decode("utf-8")
+    return {"filename": doc.filename, "description": req.form.get("description"), "content": content}
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws):
+    while True:
+        data = ws.receive_text()
+        ws.send_text(f"echo: {data}")
+```
+
+---
+
+### §5. Production Ergonomics (APIRouter & Lifespan Hooks)
+
+#### FastAPI
+```python
+from fastapi import FastAPI, APIRouter
+
+app = FastAPI()
 router = APIRouter()
 
 @router.get("/ping")
@@ -178,26 +277,13 @@ def startup_event():
 @app.on_event("shutdown")
 def shutdown_event():
     print("App shutting down...")
-
 ```
 
-### RustAPI
-
+#### RustAPI
 ```python
-import rustapi
+from rustapi import Engine, APIRouter
 
-app = rustapi.Engine()
-
-# Mock or native APIRouter interface compatibility
-class APIRouter:
-    def __init__(self):
-        self.routes = []
-    def get(self, path):
-        def decorator(func):
-            self.routes.append(("GET", path, func))
-            return func
-        return decorator
-
+app = Engine()
 router = APIRouter()
 
 @router.get("/ping")
@@ -211,63 +297,70 @@ def startup_event():
     print("App starting up...")
 
 @app.on_event("shutdown")
-async def shutdown_event():
+def shutdown_event():
     print("App shutting down...")
-
 ```
 
 ---
 
-## §4. Advanced I/O: File Uploads & WebSockets
+### §6. Model Context Protocol (MCP) Server Integration
 
-### FastAPI
-
-```python
-from fastapi import FastAPI, UploadFile, File, Form, WebSocket
-
-app = FastAPI()
-
-@app.post("/upload")
-def upload(document: UploadFile = File(...), description: str = Form(...)):
-    return {"filename": document.filename, "description": description}
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    while True:
-        data = await websocket.receive_text()
-        await websocket.send_text(f"echo: {data}")
-
-```
-
-### RustAPI
+RustAPI features a built-in MCP server that handles JSON-RPC 2.0 requests over HTTP at `POST /mcp`.
 
 ```python
-import rustapi
+from rustapi import Engine
 
-app = rustapi.Engine()
+app = Engine()
 
-@app.post("/upload")
-def upload(req):
-    doc = req.files["document"][0]
-    content = doc.read().decode("utf-8")
-    return {"filename": doc.filename, "description": req.form.get("description"), "content": content}
+# 1. Register MCP Tool
+@app.tool(name="calculator", description="Performs basic calculation")
+def calculate(expression: str) -> str:
+    return str(eval(expression))
 
-@app.websocket("/ws")
-async def websocket_endpoint(ws):
-    while True:
-        data = ws.receive_text()
-        ws.send_text(f"echo: {data}")
+# 2. Register MCP Resource
+@app.resource(uri="config://app", mime_type="application/json")
+def get_config():
+    return '{"env": "production", "debug": false}'
 
+# 3. Register MCP Prompt
+@app.prompt(name="summarize", description="Summarization template")
+def summarize_prompt(text: str):
+    return f"Please summarize the following text:\n\n{text}"
+
+if __name__ == "__main__":
+    app.run(port=8000)
 ```
 
-The comprehensive migration and reference guide has been successfully generated and saved to **`docs.md`**.
+---
 
-###  It contains side-by-side code blocks comparing **FastAPI** against **RustAPI** across all completed milestones:
+## 🛠 API Reference
 
-1. **§0 Core Engine & Routing** (`def` vs `async def`)
-2. **§1 Metadata, Custom Responses, & Pydantic Validation** (`req.headers`, `rustapi.Response`, automatic `422` errors)
-3. **§2 Dependency Injection & Generator Teardowns** (`Depends` with auto-cleanup)
-4. **§5 Production Ergonomics** (`APIRouter` prefixing and `@app.on_event` lifespan hooks)
-5. **Advanced I/O** (Multipart `UploadFile` extraction and native bidirectional `WebSocket` streaming)
+### `rustapi.Engine`
+The primary application class representing the server and router engine.
 
+| Method / Property | Description |
+| :--- | :--- |
+| `@app.get(path)` | Registers a GET HTTP route. |
+| `@app.post(path)` | Registers a POST HTTP route. |
+| `@app.put(path)` | Registers a PUT HTTP route. |
+| `@app.delete(path)` | Registers a DELETE HTTP route. |
+| `@app.patch(path)` | Registers a PATCH HTTP route. |
+| `@app.websocket(path)` | Registers a WebSocket route. |
+| `include_router(router, prefix="")` | Mounts an `APIRouter` instance under an optional path prefix. |
+| `@app.on_event("startup" \| "shutdown")` | Registers lifecycle startup or shutdown handlers. |
+| `@app.tool(name=None, description=None)` | Registers an MCP Tool endpoint. |
+| `@app.resource(uri, mime_type=None)` | Registers an MCP Resource endpoint. |
+| `@app.prompt(name=None, description=None)` | Registers an MCP Prompt endpoint. |
+| `run(host="127.0.0.1", port=8000, reload=False, workers=1)` | Starts the Tokio/Hyper server instance. |
+
+### Module Exports (`rustapi`)
+
+- `Engine`: Main server application class.
+- `APIRouter`: Modular route grouping class.
+- `Response`: Custom response object with custom `status_code` and `headers`.
+- `StreamingResponse`: Generator-backed HTTP chunked streaming response.
+- `HTTPException`: Standard HTTP exception with `status_code` and `detail`.
+- `Depends`: Dependency injection helper.
+- `BackgroundTasks`: Helper for scheduling background task execution.
+- `UploadFile`: Wrapper for multipart uploaded file streams (`read()`, `filename`, `content_type`).
+- `WebSocket`: Full-duplex WebSocket object (`receive_text()`, `send_text()`).

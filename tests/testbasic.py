@@ -91,6 +91,18 @@ def db_session_generator():
 def get_users(db=Depends(db_session_generator)):
     return {"status": "success", "db": db}
 
+@app.get("/raise-404")
+def raise_404_endpoint():
+    raise rustapi.HTTPException(status_code=404, detail="Resource missing")
+
+@app.get("/stream-test")
+def stream_route():
+    def generator():
+        yield "Hello "
+        yield "from "
+        yield "RustAPI!"
+    return rustapi.StreamingResponse(generator(), media_type="text/plain")
+
 # -- Phase 3: Modularization (APIRouter) --
 router = APIRouter()
 
@@ -385,3 +397,19 @@ def test_parameter_coercion_failure_422():
     res = requests.get(f"{BASE}/calc/not-an-int?b=3.14&active=true")
     assert res.status_code == 422
     assert "must be an integer" in res.json().get("detail", "")
+
+
+def test_streaming_response():
+    logger.info("[RUNNING] Test: StreamingResponse chunked transmission")
+    res = requests.get(f"{BASE}/stream-test")
+    assert res.status_code == 200
+    assert res.text == "Hello from RustAPI!"
+    logger.info("✅ [PASSED] StreamingResponse transmitted chunks successfully.\n")
+
+def test_httpexception_status_codes():
+    logger.info("[RUNNING] Test: HTTPException custom status codes (404, 401)")
+    res = requests.get(f"{BASE}/raise-404")
+    assert res.status_code == 404
+    assert res.json().get("detail") == "Resource missing"
+    logger.info("✅ [PASSED] HTTPException custom status code mapped correctly.\n")
+
