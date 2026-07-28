@@ -9,5 +9,22 @@ try:
 except ImportError:
     from ._rustapi import PyResponse as Response
 
+try:
+    from ._rustapi import Database
+except ImportError:
+    pass
+
 __version__ = "0.1.19"
-__all__ = ["Engine", "PyRequest", "Response", "StreamingResponse", "HTTPException", "Depends", "APIRouter", "BackgroundTasks", "UploadFile", "WebSocket"]
+__all__ = [
+    "Engine",
+    "PyRequest",
+    "Response",
+    "StreamingResponse",
+    "HTTPException",
+    "Depends",
+    "APIRouter",
+    "BackgroundTasks",
+    "UploadFile",
+    "WebSocket",
+    "Database",
+]

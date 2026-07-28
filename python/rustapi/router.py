@@ -16,26 +16,26 @@ class APIRouter:
         self.prefix = prefix
         self.tags = tags or []
 
-    def _add(self, method: str, path: str):
+    def _add(self, method: str, path: str, response_model: type | None = None):
         def decorator(func):
-            self.routes.append((method, path, func))
+            self.routes.append((method, path, func, response_model))
             return func
         return decorator
 
-    def get(self, path: str):
-        return self._add("GET", path)
+    def get(self, path: str, response_model: type | None = None):
+        return self._add("GET", path, response_model=response_model)
 
-    def post(self, path: str):
-        return self._add("POST", path)
+    def post(self, path: str, response_model: type | None = None):
+        return self._add("POST", path, response_model=response_model)
 
-    def put(self, path: str):
-        return self._add("PUT", path)
+    def put(self, path: str, response_model: type | None = None):
+        return self._add("PUT", path, response_model=response_model)
 
-    def delete(self, path: str):
-        return self._add("DELETE", path)
+    def delete(self, path: str, response_model: type | None = None):
+        return self._add("DELETE", path, response_model=response_model)
 
-    def patch(self, path: str):
-        return self._add("PATCH", path)
+    def patch(self, path: str, response_model: type | None = None):
+        return self._add("PATCH", path, response_model=response_model)
 
     def websocket(self, path: str):
         return self._add("WS", path)

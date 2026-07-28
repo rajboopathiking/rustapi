@@ -6,7 +6,17 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
-use std::sync::{mpsc, Arc, Mutex as StdMutex};
+use std::sync::{mpsc, Arc, Mutex as StdMutex, OnceLock};
+static DB_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+fn get_db_rt() -> &'static tokio::runtime::Runtime {
+    DB_RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create DB runtime")
+    })
+}
 use std::thread;
 use std::time::Duration;
 
@@ -77,6 +87,8 @@ struct RouteEntry {
     dependencies: Vec<DependencyMeta>,
     param_names: Vec<String>,
     param_types: HashMap<String, ParamType>,
+    required_params: Vec<String>,
+    response_model: Option<Py<PyAny>>,
 }
 
 type Routes   = Arc<StdMutex<Vec<RouteEntry>>>;
@@ -423,8 +435,10 @@ async fn execute_python_handler(
     exec_res: PyResult<PyObject>,
     is_async: bool,
     serializer: &PyObject,
+    filter_response: &PyObject,
     schedule_coro: &PyObject,
     raw_string: bool,
+    response_model: Option<&PyObject>,
 ) -> (u16, String, HashMap<String, String>) {
     // Await coroutine if the handler is async.
     let py_result: PyResult<PyObject> = if is_async {
@@ -460,11 +474,29 @@ async fn execute_python_handler(
                     let resp_ref = resp.borrow();
                     let status  = resp_ref.status_code;
                     let headers = resp_ref.headers.clone();
-                    let body_str = serialize_value(py, &resp_ref.content, serializer, raw_string);
+                    let is_raw = headers.get("content-type")
+                        .or_else(|| headers.get("Content-Type"))
+                        .map(|ct| ct.contains("application/json") || ct.contains("text/"))
+                        .unwrap_or(false);
+                    let content_obj = if let Some(model) = response_model {
+                        filter_response.bind(py).call1((&resp_ref.content, model))
+                            .map(|b| b.unbind())
+                            .unwrap_or_else(|_| resp_ref.content.clone_ref(py))
+                    } else {
+                        resp_ref.content.clone_ref(py)
+                    };
+                    let body_str = serialize_value(py, &content_obj, serializer, is_raw || raw_string);
                     return (status, body_str, headers);
                 }
                 // Plain return value.
-                let body_str = serialize_value(py, &py_obj, serializer, raw_string);
+                let filtered_obj = if let Some(model) = response_model {
+                    filter_response.bind(py).call1((&py_obj, model))
+                        .map(|b| b.unbind())
+                        .unwrap_or_else(|_| py_obj.clone_ref(py))
+                } else {
+                    py_obj
+                };
+                let body_str = serialize_value(py, &filtered_obj, serializer, raw_string);
                 (200, body_str, HashMap::new())
             }
             Err(err) => {
@@ -525,6 +557,7 @@ fn serialize_value(py: Python<'_>, obj: &PyObject, serializer: &PyObject, raw_st
 struct Engine {
     routes: Routes,
     serializer: PyObject,
+    filter_response_fn: PyObject,
     tools: Tools,
     resources: Resources,
     prompts: Prompts,
@@ -532,6 +565,10 @@ struct Engine {
     schedule_coro_fn: PyObject,
     startup_handlers: Handlers,
     shutdown_handlers: Handlers,
+    #[pyo3(get, set)]
+    dependency_overrides: PyObject,
+    #[pyo3(get)]
+    db: Option<Py<PyDatabase>>,
 }
 
 #[allow(non_local_definitions)]
@@ -554,45 +591,118 @@ def _schedule_coro(coro, callback):
     fut.add_done_callback(done_cb)
 def _serialize_response(val):
     return json.dumps(val, default=lambda o: o.model_dump() if hasattr(o, "model_dump") else str(o))
+def _filter_response(val, response_model):
+    if response_model is None or val is None:
+        return val
+    try:
+        from pydantic import TypeAdapter
+        if isinstance(val, list) and hasattr(response_model, "model_validate"):
+            adapter = TypeAdapter(list[response_model])
+        else:
+            adapter = TypeAdapter(response_model)
+        validated = adapter.validate_python(val)
+        return adapter.dump_python(validated, mode="json")
+    except Exception:
+        if hasattr(response_model, "model_validate"):
+            if isinstance(val, list):
+                return [response_model.model_validate(i).model_dump(mode="json") for i in val]
+            return response_model.model_validate(val).model_dump(mode="json")
+        return val
 def _schema_from_signature(func):
     sig = inspect.signature(func)
     props = {name: {"type": "string"} for name in sig.parameters}
     return {"type": "object", "properties": props}
 "#;
         let module = PyModule::from_code_bound(py, python_code, "rustapi_internal.py", "rustapi_internal")?;
+        let overrides = pyo3::types::PyDict::new_bound(py).unbind().into();
         Ok(Engine {
-            routes:           Arc::new(StdMutex::new(Vec::new())),
-            serializer:       module.getattr("_serialize_response")?.into(),
-            schedule_coro_fn: module.getattr("_schedule_coro")?.into(),
-            schema_fn:        module.getattr("_schema_from_signature")?.into(),
-            tools:            Arc::new(StdMutex::new(Vec::new())),
-            resources:        Arc::new(StdMutex::new(Vec::new())),
-            prompts:          Arc::new(StdMutex::new(Vec::new())),
-            startup_handlers:  Arc::new(StdMutex::new(Vec::new())),
-            shutdown_handlers: Arc::new(StdMutex::new(Vec::new())),
+            routes:               Arc::new(StdMutex::new(Vec::new())),
+            serializer:           module.getattr("_serialize_response")?.into(),
+            filter_response_fn:   module.getattr("_filter_response")?.into(),
+            schedule_coro_fn:     module.getattr("_schedule_coro")?.into(),
+            schema_fn:            module.getattr("_schema_from_signature")?.into(),
+            tools:                Arc::new(StdMutex::new(Vec::new())),
+            resources:            Arc::new(StdMutex::new(Vec::new())),
+            prompts:              Arc::new(StdMutex::new(Vec::new())),
+            startup_handlers:      Arc::new(StdMutex::new(Vec::new())),
+            shutdown_handlers:     Arc::new(StdMutex::new(Vec::new())),
+            dependency_overrides: overrides,
+            db: None,
         })
     }
 
     // -- Route decorators --------------------------------------------------
-    fn get    (&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "GET".into(),    path, is_ws: false } }
-    fn post   (&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "POST".into(),   path, is_ws: false } }
-    fn put    (&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "PUT".into(),    path, is_ws: false } }
-    fn delete (&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "DELETE".into(), path, is_ws: false } }
-    fn patch  (&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "PATCH".into(),  path, is_ws: false } }
-    fn websocket(&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "GET".into(),  path, is_ws: true  } }
+    #[pyo3(signature = (path, response_model=None))]
+    fn get    (&self, path: String, response_model: Option<Py<PyAny>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "GET".into(),    path, is_ws: false, response_model } }
+    #[pyo3(signature = (path, response_model=None))]
+    fn post   (&self, path: String, response_model: Option<Py<PyAny>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "POST".into(),   path, is_ws: false, response_model } }
+    #[pyo3(signature = (path, response_model=None))]
+    fn put    (&self, path: String, response_model: Option<Py<PyAny>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "PUT".into(),    path, is_ws: false, response_model } }
+    #[pyo3(signature = (path, response_model=None))]
+    fn delete (&self, path: String, response_model: Option<Py<PyAny>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "DELETE".into(), path, is_ws: false, response_model } }
+    #[pyo3(signature = (path, response_model=None))]
+    fn patch  (&self, path: String, response_model: Option<Py<PyAny>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "PATCH".into(),  path, is_ws: false, response_model } }
+    #[pyo3(signature = (path))]
+    fn websocket(&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "GET".into(), path, is_ws: true, response_model: None } }
+
+    // -- Rust-Native Database Engine ---------------------------------------
+    #[pyo3(signature = (url))]
+    fn connect_db(&mut self, py: Python<'_>, url: String) -> PyResult<Py<PyDatabase>> {
+        let u = url.clone();
+
+        let (sqlite, pg) = py.allow_threads(move || {
+            let conn_str = if u == "sqlite::memory:" || u == "sqlite://:memory:" {
+                "sqlite://file:memdb1?mode=memory&cache=shared".to_string()
+            } else {
+                u.clone()
+            };
+            get_db_rt().block_on(async move {
+                if conn_str.starts_with("sqlite") {
+                    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                        .max_connections(20)
+                        .connect(&conn_str)
+                        .await
+                        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    Ok::<_, PyErr>((Some(pool), None))
+                } else if conn_str.starts_with("postgres") {
+                    let pool = sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(20)
+                        .connect(&conn_str)
+                        .await
+                        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    Ok::<_, PyErr>((None, Some(pool)))
+                } else {
+                    Err(pyo3::exceptions::PyValueError::new_err(format!("Unsupported database URL scheme in '{}'", conn_str)))
+                }
+            })
+        })?;
+
+        let db_obj = Py::new(py, PyDatabase {
+            sqlite_pool: sqlite,
+            pg_pool: pg,
+        })?;
+
+        self.db = Some(db_obj.clone_ref(py));
+        Ok(db_obj)
+    }
 
     /// Mount a sub-router, supporting all HTTP methods.
     #[pyo3(signature = (router, prefix = "".to_string()))]
     fn include_router(&self, py: Python<'_>, router: Py<PyAny>, prefix: String) -> PyResult<()> {
-        let routes: Vec<(String, String, Py<PyAny>)> = router.getattr(py, "routes")?.extract(py)?;
-        for (method, path, func) in routes {
+        for item_res in router.getattr(py, "routes")?.bind(py).iter()? {
+            let item = item_res?;
+            let len = item.len()?;
+            let method: String = item.get_item(0)?.extract()?;
+            let path: String = item.get_item(1)?.extract()?;
+            let func: Py<PyAny> = item.get_item(2)?.extract()?;
+            let response_model: Option<Py<PyAny>> = if len > 3 { item.get_item(3)?.extract().ok() } else { None };
             let full_path = format!("{}{}", prefix, path).replace("//", "/");
             match method.as_str() {
-                "GET"    => { self.get(full_path).__call__(py, func)?; }
-                "POST"   => { self.post(full_path).__call__(py, func)?; }
-                "PUT"    => { self.put(full_path).__call__(py, func)?; }
-                "DELETE" => { self.delete(full_path).__call__(py, func)?; }
-                "PATCH"  => { self.patch(full_path).__call__(py, func)?; }
+                "GET"    => { self.get(full_path, response_model).__call__(py, func)?; }
+                "POST"   => { self.post(full_path, response_model).__call__(py, func)?; }
+                "PUT"    => { self.put(full_path, response_model).__call__(py, func)?; }
+                "DELETE" => { self.delete(full_path, response_model).__call__(py, func)?; }
+                "PATCH"  => { self.patch(full_path, response_model).__call__(py, func)?; }
                 "WS"     => { self.websocket(full_path).__call__(py, func)?; }
                 other    => eprintln!("include_router: unsupported method '{}'", other),
             };
@@ -700,19 +810,21 @@ def _schema_from_signature(func):
             eprintln!("INFO:     RustAPI server running on http://{host}:{port} (Press CTRL+C to quit)");
         }
 
-        let routes           = self.routes.clone();
-        let tools            = self.tools.clone();
-        let resources        = self.resources.clone();
-        let prompts          = self.prompts.clone();
-        let serializer_arc   = Arc::new(self.serializer.clone_ref(py));
-        let schedule_coro_arc = Arc::new(self.schedule_coro_fn.clone_ref(py));
-        let num_cpus         = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        let gil_semaphore    = Arc::new(Semaphore::new(num_cpus * 2));
-        let startup_handlers  = self.startup_handlers.clone();
-        let shutdown_handlers = self.shutdown_handlers.clone();
+        let routes                = self.routes.clone();
+        let tools                 = self.tools.clone();
+        let resources             = self.resources.clone();
+        let prompts               = self.prompts.clone();
+        let serializer_arc        = Arc::new(self.serializer.clone_ref(py));
+        let filter_response_arc   = Arc::new(self.filter_response_fn.clone_ref(py));
+        let schedule_coro_arc     = Arc::new(self.schedule_coro_fn.clone_ref(py));
+        let dependency_overrides_arc = Arc::new(self.dependency_overrides.clone_ref(py));
+        let num_cpus              = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let gil_semaphore         = Arc::new(Semaphore::new(num_cpus * 2));
+        let startup_handlers      = self.startup_handlers.clone();
+        let shutdown_handlers     = self.shutdown_handlers.clone();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        let mut shutdown_tx = Some(shutdown_tx);
-        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let mut shutdown_tx       = Some(shutdown_tx);
+        let (done_tx, done_rx)    = mpsc::channel::<()>();
 
         let server_handle = thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -730,13 +842,14 @@ def _schema_from_signature(func):
 
                 // Build and serve.
                 let make_svc = make_service_fn(move |_| {
-                    let (r, t, res, p, s, sc, sem) = (
+                    let (r, t, res, p, s, fr, sc, sem, do_arc) = (
                         routes.clone(), tools.clone(), resources.clone(), prompts.clone(),
-                        serializer_arc.clone(), schedule_coro_arc.clone(), gil_semaphore.clone(),
+                        serializer_arc.clone(), filter_response_arc.clone(), schedule_coro_arc.clone(), gil_semaphore.clone(),
+                        dependency_overrides_arc.clone(),
                     );
                     async move {
                         Ok::<_, Infallible>(service_fn(move |req| {
-                            handle(req, r.clone(), s.clone(), sc.clone(), t.clone(), res.clone(), p.clone(), sem.clone())
+                            handle(req, r.clone(), s.clone(), fr.clone(), sc.clone(), t.clone(), res.clone(), p.clone(), sem.clone(), do_arc.clone())
                         }))
                     }
                 });
@@ -830,11 +943,13 @@ async fn handle(
     mut req: HyperRequest<Body>,
     routes: Routes,
     serializer: Arc<PyObject>,
+    filter_response: Arc<PyObject>,
     schedule_coro: Arc<PyObject>,
     tools: Tools,
     resources: Resources,
     prompts: Prompts,
     gil_sem: Arc<Semaphore>,
+    dependency_overrides: Arc<PyObject>,
 ) -> Result<HyperResponse<Body>, Infallible> {
     let method      = req.method().to_string();
     let path        = req.uri().path().to_string();
@@ -947,21 +1062,28 @@ async fn handle(
             }
         }
     } else {
+        use futures_util::StreamExt;
         let mut body_stream = req.into_body();
-        while let Some(chunk_res) = hyper::body::HttpBody::data(&mut body_stream).await {
-            let chunk = chunk_res.unwrap_or_default();
-            if body_bytes.len() + chunk.len() > MAX_PAYLOAD_SIZE {
-                return Ok(HyperResponse::builder().status(413).body(Body::from("Payload Too Large")).unwrap());
+        while let Some(chunk) = body_stream.next().await {
+            if let Ok(data) = chunk {
+                if body_bytes.len() + data.len() > MAX_PAYLOAD_SIZE {
+                    let mut h = HashMap::new();
+                    h.insert("Content-Type".to_string(), "application/json".to_string());
+                    let resp = HyperResponse::builder()
+                        .status(413)
+                        .body(Body::from(r#"{"detail":"Payload Too Large"}"#))
+                        .unwrap();
+                    return Ok(resp);
+                }
+                body_bytes.extend_from_slice(&data);
             }
-            body_bytes.extend_from_slice(&chunk);
         }
     }
     let body = String::from_utf8_lossy(&body_bytes).to_string();
 
     // -----------------------------------------------------------------------
-    // Route dispatch
+    // Internal built-in routes & route matching
     // -----------------------------------------------------------------------
-
     let (status, resp_body, resp_headers) = if method == "GET" && path == "/docs" {
         let mut h = HashMap::new();
         h.insert("Content-Type".to_string(), "text/html".to_string());
@@ -990,7 +1112,7 @@ async fn handle(
                     idx, path_params, method, path, body,
                     headers_map, cookies_map, query_params,
                     form_map, files_map,
-                    &routes, &serializer, &schedule_coro, &gil_sem,
+                    &routes, &serializer, &filter_response, &schedule_coro, &gil_sem, &dependency_overrides,
                 ).await;
                 match result {
                     Ok(resp)      => return Ok(resp),
@@ -1129,7 +1251,7 @@ async fn handle_mcp(
                     }).await.unwrap_or_else(|e| Err(pyo3::exceptions::PyRuntimeError::new_err(format!("worker panicked: {e}"))));
 
                     let (t_status, content, _) =
-                        execute_python_handler(exec_res, is_async_tool, serializer, schedule_coro, true).await;
+                        execute_python_handler(exec_res, is_async_tool, serializer, serializer, schedule_coro, true, None).await;
                     ok(json!({ "content": [{ "type": "text", "text": content }], "isError": t_status >= 400 }))
                 }
                 None => err(-32602, &format!("Unknown tool: {}", name)),
@@ -1160,12 +1282,14 @@ async fn handle_route(
     files_map: HashMap<String, Vec<PyUploadFile>>,
     routes: &Routes,
     serializer: &Arc<PyObject>,
+    filter_response: &Arc<PyObject>,
     schedule_coro: &Arc<PyObject>,
     gil_sem: &Arc<Semaphore>,
+    dependency_overrides: &Arc<PyObject>,
 ) -> Result<HyperResponse<Body>, String> {
     // Extract route metadata.
     let (handler, is_async, pydantic_model, pydantic_param_name, request_param_name,
-         background_task_param_name, deps, param_names, param_types) =
+         background_task_param_name, deps, param_names, param_types, required_params, response_model) =
         Python::with_gil(|py| {
             let guard = routes.lock().unwrap();
             let e = &guard[idx];
@@ -1175,6 +1299,8 @@ async fn handle_route(
                 e.pydantic_param_name.clone(), e.request_param_name.clone(),
                 e.background_task_param_name.clone(),
                 e.dependencies.clone(), e.param_names.clone(), e.param_types.clone(),
+                e.required_params.clone(),
+                e.response_model.as_ref().map(|m| m.clone_ref(py)),
             )
         });
 
@@ -1185,6 +1311,17 @@ async fn handle_route(
     let mut teardown_gens   = Vec::<PyObject>::new();
 
     for dep in deps {
+        let dep_func = Python::with_gil(|py| -> PyObject {
+            if let Ok(dict) = dependency_overrides.bind(py).downcast::<pyo3::types::PyDict>() {
+                if let Ok(Some(ov)) = dict.get_item(&dep.func) {
+                    if !ov.is_none() {
+                        return ov.unbind();
+                    }
+                }
+            }
+            dep.func.clone_ref(py)
+        });
+
         if dep.use_cache {
             if let Some(cached) = dep_cache.get(&dep.id) {
                 let v = Python::with_gil(|py| cached.clone_ref(py));
@@ -1194,7 +1331,7 @@ async fn handle_route(
         }
 
         let dep_res: Result<PyObject, String> = if dep._is_async {
-            let coro = Python::with_gil(|py| dep.func.call0(py).map_err(|e| e.to_string()));
+            let coro = Python::with_gil(|py| dep_func.call0(py).map_err(|e| e.to_string()));
             match coro {
                 Ok(c) => {
                     let (tx, rx) = oneshot::channel();
@@ -1213,11 +1350,11 @@ async fn handle_route(
                 Err(e) => Err(e),
             }
         } else {
-            let sem      = gil_sem.clone();
-            let dep_func = Python::with_gil(|py| dep.func.clone_ref(py));
+            let sem        = gil_sem.clone();
+            let dep_func_c = Python::with_gil(|py| dep_func.clone_ref(py));
             tokio::task::spawn_blocking(move || {
                 let _permit = sem.try_acquire().ok();
-                Python::with_gil(|py| dep_func.call0(py).map_err(|e| e.to_string()))
+                Python::with_gil(|py| dep_func_c.call0(py).map_err(|e| e.to_string()))
             })
             .await
             .unwrap_or_else(|_| Err("Panic".to_string()))
@@ -1269,22 +1406,30 @@ async fn handle_route(
     let bg_param_name_c   = background_task_param_name.clone();
 
     // -- Call the handler -------------------------------------------------
-    let sem_c          = gil_sem.clone();
-    let param_names_c  = param_names.clone();
-    let path_params_c  = path_params.clone();
-    let query_params_c = query_params.clone();
-    let method_c       = method.clone();
-    let path_c         = path.clone();
-    let body_c         = body.clone();
-    let headers_c      = headers_map.clone();
-    let cookies_c      = cookies_map.clone();
-    let form_c         = form_map.clone();
-    let files_c        = files_map.clone();
+    let sem_c               = gil_sem.clone();
+    let param_names_c       = param_names.clone();
+    let required_params_c   = required_params.clone();
+    let path_params_c       = path_params.clone();
+    let query_params_c      = query_params.clone();
+    let method_c            = method.clone();
+    let path_c              = path.clone();
+    let body_c              = body.clone();
+    let headers_c           = headers_map.clone();
+    let cookies_c           = cookies_map.clone();
+    let form_c              = form_map.clone();
+    let files_c             = files_map.clone();
 
     let exec_res: PyResult<PyObject> = tokio::task::spawn_blocking(move || {
         let _permit = sem_c.try_acquire().ok();
         Python::with_gil(|py| -> PyResult<PyObject> {
             let kwargs = pyo3::types::PyDict::new_bound(py);
+
+            // Enforce required parameters presence.
+            for req_p in &required_params_c {
+                if !path_params_c.contains_key(req_p) && !query_params_c.contains_key(req_p) {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!("422: Missing required parameter '{}'", req_p)));
+                }
+            }
 
             // Type-coercing parameter binder (path + query).
             let apply_params = |params: &HashMap<String, String>| -> Result<(), String> {
@@ -1368,7 +1513,7 @@ async fn handle_route(
 
     // -- Normal / async handler -------------------------------------------
     let (r_status, r_body, mut r_headers) =
-        execute_python_handler(exec_res, is_async, serializer, schedule_coro, false).await;
+        execute_python_handler(exec_res, is_async, serializer, filter_response, schedule_coro, false, response_model.as_ref()).await;
 
     if !r_headers.keys().any(|k| k.eq_ignore_ascii_case("content-type")) {
         r_headers.insert("Content-Type".to_string(), "application/json".to_string());
@@ -1436,7 +1581,7 @@ async fn handle_route(
 // ---------------------------------------------------------------------------
 
 #[pyclass]
-struct RouteDecorator { routes: Routes, method: String, path: String, is_ws: bool }
+struct RouteDecorator { routes: Routes, method: String, path: String, is_ws: bool, response_model: Option<Py<PyAny>> }
 
 #[allow(non_local_definitions)]
 #[pymethods]
@@ -1453,6 +1598,7 @@ impl RouteDecorator {
         let mut request_param_name         = None;
         let mut background_task_param_name = None;
         let mut websocket_param_name       = None;
+        let mut required_params            = Vec::new();
         let mut dependencies               = Vec::new();
         let mut param_names                = Vec::new();
         let mut param_types                = HashMap::new();
@@ -1472,6 +1618,11 @@ impl RouteDecorator {
                         websocket_param_name = Some(param_name.clone());
                         continue;
                     }
+
+                    let default_val = p.getattr("default").ok();
+                    let is_empty_default = default_val.as_ref()
+                        .map(|d| d.to_string().contains("_empty"))
+                        .unwrap_or(true);
 
                     if let Ok(annotation) = p.getattr("annotation") {
                         if let Ok(name) = annotation.getattr("__name__") {
@@ -1502,15 +1653,15 @@ impl RouteDecorator {
                         }
                     }
 
-                    if let Ok(default_val) = p.getattr("default") {
-                        let is_depends = default_val
+                    if let Some(ref d_val) = default_val {
+                        let is_depends = d_val
                             .getattr("__class__")
                             .and_then(|cls| cls.getattr("__name__"))
                             .and_then(|n| n.extract::<String>())
                             .map(|n| n == "Depends")
                             .unwrap_or(false);
                         if is_depends {
-                            let dep_func = if let Ok(explicit) = default_val.getattr("dependency") {
+                            let dep_func = if let Ok(explicit) = d_val.getattr("dependency") {
                                 if explicit.is_none() { p.getattr("annotation").unwrap_or_else(|_| py.None().into_bound(py)) }
                                 else { explicit }
                             } else {
@@ -1521,12 +1672,17 @@ impl RouteDecorator {
                                 let is_dep_gen   = inspect.getattr("isgeneratorfunction")?.call1((&dep_func,))?.extract().unwrap_or(false);
                                 let dep_id       = dep_func.as_ptr() as isize;
                                 dependencies.push(DependencyMeta {
-                                    name: param_name, func: dep_func.into(),
+                                    name: param_name.clone(), func: dep_func.into(),
                                     _is_async: is_dep_async, is_generator: is_dep_gen,
                                     use_cache: true, id: dep_id,
                                 });
                             }
+                            continue;
                         }
+                    }
+
+                    if is_empty_default && param_name != "req" && param_name != "request" && !self.is_ws {
+                        required_params.push(param_name.clone());
                     }
                 }
             }
@@ -1537,7 +1693,8 @@ impl RouteDecorator {
             segments: parse_pattern(&self.path), handler: func.clone_ref(py), is_async,
             pydantic_model, pydantic_param_name, _request_schema_json: request_schema_json,
             request_param_name, background_task_param_name, websocket_param_name,
-            is_websocket: self.is_ws, dependencies, param_names, param_types,
+            is_websocket: self.is_ws, dependencies, param_names, param_types, required_params,
+            response_model: self.response_model.as_ref().map(|m| m.clone_ref(py)),
         });
         Ok(func)
     }
@@ -1563,12 +1720,13 @@ struct ToolDecorator { tools: Tools, schema_fn: PyObject, name: Option<String>, 
 #[pymethods]
 impl ToolDecorator {
     fn __call__(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let doc: String = py.import_bound("inspect")?.call_method1("getdoc", (func.bind(py),))?.extract().unwrap_or_default();
         let schema_obj = self.schema_fn.bind(py).call1((func.bind(py),))?;
         let schema_str: String = py.import_bound("json")?.call_method1("dumps", (schema_obj,))?.extract()?;
         let is_async = py.import_bound("inspect")?.getattr("iscoroutinefunction")?.call1((func.bind(py),))?.extract()?;
         self.tools.lock().unwrap().push(ToolEntry {
             name: self.name.clone().unwrap_or_else(|| func.bind(py).getattr("__name__").unwrap().extract().unwrap()),
-            _description: self.description.clone().unwrap_or_default(),
+            _description: self.description.clone().unwrap_or(doc),
             schema_json: serde_json::from_str(&schema_str).unwrap(),
             handler: func.clone_ref(py), _is_async: is_async,
         });
@@ -1611,6 +1769,119 @@ impl PromptDecorator {
     }
 }
 
+#[pyclass(name = "Database")]
+struct PyDatabase {
+    sqlite_pool: Option<sqlx::SqlitePool>,
+    pg_pool: Option<sqlx::PgPool>,
+}
+
+#[pymethods]
+impl PyDatabase {
+    #[pyo3(signature = (query))]
+    fn execute(&self, py: Python<'_>, query: String) -> PyResult<u64> {
+        let pool = self.sqlite_pool.clone();
+        let pg = self.pg_pool.clone();
+
+        py.allow_threads(move || {
+            get_db_rt().block_on(async move {
+                if let Some(sqlite) = pool {
+                    let res = sqlx::query(&query).execute(&sqlite).await
+                        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    Ok(res.rows_affected())
+                } else if let Some(pg_p) = pg {
+                    let res = sqlx::query(&query).execute(&pg_p).await
+                        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    Ok(res.rows_affected())
+                } else {
+                    Err(pyo3::exceptions::PyRuntimeError::new_err("No active database pool"))
+                }
+            })
+        })
+    }
+
+    #[pyo3(signature = (query))]
+    fn query_json(&self, py: Python<'_>, query: String) -> PyResult<PyResponse> {
+        use sqlx::{Column, Row, ValueRef};
+
+        let pool = self.sqlite_pool.clone();
+        let pg = self.pg_pool.clone();
+
+        let json_str: String = py.allow_threads(move || {
+            get_db_rt().block_on(async move {
+                if let Some(sqlite) = pool {
+                    let rows = sqlx::query(&query).fetch_all(&sqlite).await
+                        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    let mut records = Vec::new();
+                    for row in rows {
+                        let mut map = serde_json::Map::new();
+                        for col in row.columns() {
+                            let col_name = col.name();
+                            let val: serde_json::Value = match row.try_get_raw(col_name) {
+                                Ok(raw) if !raw.is_null() => {
+                                    if let Ok(i) = row.try_get::<i64, _>(col_name) {
+                                        serde_json::Value::Number(i.into())
+                                    } else if let Ok(f) = row.try_get::<f64, _>(col_name) {
+                                        serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap_or(serde_json::Number::from(0)))
+                                    } else if let Ok(b) = row.try_get::<bool, _>(col_name) {
+                                        serde_json::Value::Bool(b)
+                                    } else if let Ok(s) = row.try_get::<String, _>(col_name) {
+                                        serde_json::Value::String(s)
+                                    } else {
+                                        serde_json::Value::Null
+                                    }
+                                }
+                                _ => serde_json::Value::Null,
+                            };
+                            map.insert(col_name.to_string(), val);
+                        }
+                        records.push(serde_json::Value::Object(map));
+                    }
+                    Ok::<_, PyErr>(serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string()))
+                } else if let Some(pg_p) = pg {
+                    let rows = sqlx::query(&query).fetch_all(&pg_p).await
+                        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    let mut records = Vec::new();
+                    for row in rows {
+                        let mut map = serde_json::Map::new();
+                        for col in row.columns() {
+                            let col_name = col.name();
+                            let val: serde_json::Value = match row.try_get_raw(col_name) {
+                                Ok(raw) if !raw.is_null() => {
+                                    if let Ok(i) = row.try_get::<i64, _>(col_name) {
+                                        serde_json::Value::Number(i.into())
+                                    } else if let Ok(f) = row.try_get::<f64, _>(col_name) {
+                                        serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap_or(serde_json::Number::from(0)))
+                                    } else if let Ok(b) = row.try_get::<bool, _>(col_name) {
+                                        serde_json::Value::Bool(b)
+                                    } else if let Ok(s) = row.try_get::<String, _>(col_name) {
+                                        serde_json::Value::String(s)
+                                    } else {
+                                        serde_json::Value::Null
+                                    }
+                                }
+                                _ => serde_json::Value::Null,
+                            };
+                            map.insert(col_name.to_string(), val);
+                        }
+                        records.push(serde_json::Value::Object(map));
+                    }
+                    Ok::<_, PyErr>(serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string()))
+                } else {
+                    Err(pyo3::exceptions::PyRuntimeError::new_err("No active database pool"))
+                }
+            })
+        })?;
+
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+        Ok(PyResponse {
+            content: json_str.into_py(py),
+            status_code: 200,
+            headers,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Module registration
 // ---------------------------------------------------------------------------
@@ -1624,5 +1895,6 @@ fn _rustapi(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWebSocket>()?;
     m.add_class::<EventDecorator>()?;
     m.add_class::<PyStreamingResponse>()?;
+    m.add_class::<PyDatabase>()?;
     Ok(())
 }
