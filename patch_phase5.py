@@ -1,5 +1,5 @@
-use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple, PyBytes};
+rust_code = """use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyString, PyTuple, PyBytes};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -18,7 +18,7 @@ use futures_util::{StreamExt, SinkExt};
 use sha1::{Sha1, Digest};
 use base64::{Engine as _, engine::general_purpose};
 
-const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024; // 10 MB limit
+const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024;
 
 #[derive(Clone)]
 enum Segment { Literal(String), Param(String) }
@@ -161,25 +161,6 @@ impl Clone for PyResponse { fn clone(&self) -> Self { Python::with_gil(|py| PyRe
 #[pyclass] struct CoroCallback { tx: std::sync::Mutex<Option<oneshot::Sender<Result<PyObject, PyObject>>>> }
 #[pymethods] impl CoroCallback { #[pyo3(signature = (result, error))] fn __call__(&self, py: Python<'_>, result: PyObject, error: PyObject) { if let Some(tx) = self.tx.lock().unwrap().take() { if error.is_none(py) { let _ = tx.send(Ok(result)); } else { let _ = tx.send(Err(error)); } } } }
 
-async fn execute_python_handler(exec_res: PyResult<PyObject>, is_async: bool, serializer: &PyObject, schedule_coro: &PyObject, raw_string: bool) -> (u16, String, HashMap<String, String>) {
-    let py_result: PyResult<PyObject> = if is_async { match exec_res { Ok(coro) => { let (tx, rx) = oneshot::channel(); let spawn_res = Python::with_gil(|py| -> PyResult<()> { let cb = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) })?; schedule_coro.bind(py).call1((coro, cb))?; Ok(()) }); if let Err(e) = spawn_res { Err(e) } else { match rx.await { Ok(Ok(res)) => Ok(res), Ok(Err(err_obj)) => Python::with_gil(|py| Err(PyErr::from_value_bound(err_obj.into_bound(py)))), Err(_) => Python::with_gil(|_py| Err(pyo3::exceptions::PyRuntimeError::new_err("Asyncio dropped"))), } } } Err(e) => Err(e), } } else { exec_res };
-
-    Python::with_gil(|py| -> (u16, String, HashMap<String, String>) {
-        match py_result {
-            Ok(py_obj) => {
-                if let Ok(resp) = py_obj.downcast_bound::<PyResponse>(py) { let resp_ref = resp.borrow(); let status = resp_ref.status_code; let headers = resp_ref.headers.clone(); let body_str = if raw_string { if resp_ref.content.is_none(py) { String::new() } else if let Ok(s) = resp_ref.content.downcast_bound::<pyo3::types::PyString>(py) { s.to_string() } else { serializer.bind(py).call1((&resp_ref.content,)).unwrap().extract().unwrap_or_default() } } else { serializer.bind(py).call1((&resp_ref.content,)).unwrap().extract().unwrap_or_default() }; return (status, body_str, headers); }
-                let body_str = if raw_string { if py_obj.is_none(py) { String::new() } else if let Ok(s) = py_obj.downcast_bound::<pyo3::types::PyString>(py) { s.to_string() } else { serializer.bind(py).call1((py_obj,)).unwrap().extract().unwrap_or_default() } } else { serializer.bind(py).call1((py_obj,)).unwrap().extract().unwrap_or_default() };
-                (200, body_str, HashMap::new())
-            }
-            Err(err) => {
-                let err_str = err.to_string();
-                if err_str.contains("422:") { let clean_err = err_str.split("422: ").last().unwrap_or(&err_str).replace('"', "'"); (422, format!(r#"{{"detail":"{}"}}"#, clean_err), HashMap::new()) } 
-                else { (500, format!(r#"{{"detail":"{}"}}"#, err_str.replace('"', "'")), HashMap::new()) }
-            }
-        }
-    })
-}
-
 #[pyclass] struct Engine {
     routes: Routes, serializer: PyObject, tools: Tools, resources: Resources, prompts: Prompts,
     schema_fn: PyObject, schedule_coro_fn: PyObject,
@@ -283,10 +264,10 @@ def _schema_from_signature(func):
                 let schedule_coro_arc_2 = schedule_coro_arc.clone(); let gil_semaphore_2 = gil_semaphore.clone();
 
                 // 1. EXECUTE STARTUP HOOKS
-                let startup_handlers_vec = Python::with_gil(|py| startup_handlers.lock().unwrap().iter().map(|(h, a)| (h.clone_ref(py), *a)).collect::<Vec<_>>());
-                for (handler, is_async) in startup_handlers_vec {
+                let startup_hooks = startup_handlers.lock().unwrap().clone();
+                for (handler, is_async) in startup_hooks {
                     if is_async {
-                        let coro: Result<PyObject, pyo3::PyErr> = Python::with_gil(|py| handler.bind(py).call0().map(|v| v.into()));
+                        let coro = Python::with_gil(|py| handler.bind(py).call0().map(|v| v.into()));
                         if let Ok(c) = coro { let (tx, rx) = oneshot::channel(); Python::with_gil(|py| { if let Ok(cb) = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) }) { let _ = schedule_coro_arc_2.bind(py).call1((c, cb)); } }); let _ = rx.await; }
                     } else {
                         let sem_clone = gil_semaphore_2.clone(); tokio::task::spawn_blocking(move || { let _permit = sem_clone.try_acquire(); Python::with_gil(|py| { let _ = handler.bind(py).call0(); }); }).await.unwrap();
@@ -299,10 +280,10 @@ def _schema_from_signature(func):
                 if let Err(e) = graceful.await { eprintln!("Server error: {e}"); }
 
                 // 2. EXECUTE SHUTDOWN HOOKS
-                let shutdown_handlers_vec = Python::with_gil(|py| shutdown_handlers.lock().unwrap().iter().map(|(h, a)| (h.clone_ref(py), *a)).collect::<Vec<_>>());
-                for (handler, is_async) in shutdown_handlers_vec {
+                let shutdown_hooks = shutdown_handlers.lock().unwrap().clone();
+                for (handler, is_async) in shutdown_hooks {
                     if is_async {
-                        let coro: Result<PyObject, pyo3::PyErr> = Python::with_gil(|py| handler.bind(py).call0().map(|v| v.into()));
+                        let coro = Python::with_gil(|py| handler.bind(py).call0().map(|v| v.into()));
                         if let Ok(c) = coro { let (tx, rx) = oneshot::channel(); Python::with_gil(|py| { if let Ok(cb) = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) }) { let _ = schedule_coro_arc_2.bind(py).call1((c, cb)); } }); let _ = rx.await; }
                     } else {
                         let sem_clone = gil_semaphore_2.clone(); tokio::task::spawn_blocking(move || { let _permit = sem_clone.try_acquire(); Python::with_gil(|py| { let _ = handler.bind(py).call0(); }); }).await.unwrap();
@@ -416,7 +397,8 @@ async fn handle(
                     Python::with_gil(|py| -> PyResult<PyObject> {
                         let kwargs = pyo3::types::PyDict::new_bound(py);
                         
-                        let apply_params = |params: &HashMap<String, String>| -> Result<(), String> {
+                        // TYPED PARAMETER COERCION (NATIVE C-SPEED PARSING)
+                        let mut apply_params = |params: &HashMap<String, String>| -> Result<(), String> {
                             for (k, v) in params {
                                 if param_names_c.contains(k) {
                                     let p_type = param_types_c.get(k).unwrap_or(&ParamType::String);
@@ -470,6 +452,26 @@ async fn handle(
     Ok(builder.body(Body::from(resp_body)).unwrap())
 }
 
+async fn execute_python_handler(exec_res: PyResult<PyObject>, is_async: bool, serializer: &PyObject, schedule_coro: &PyObject, raw_string: bool) -> (u16, String, HashMap<String, String>) {
+    let py_result: PyResult<PyObject> = if is_async { match exec_res { Ok(coro) => { let (tx, rx) = oneshot::channel(); let spawn_res = Python::with_gil(|py| -> PyResult<()> { let cb = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) })?; schedule_coro.bind(py).call1((coro, cb))?; Ok(()) }); if let Err(e) = spawn_res { Err(e) } else { match rx.await { Ok(Ok(res)) => Ok(res), Ok(Err(err_obj)) => Python::with_gil(|py| Err(PyErr::from_value_bound(err_obj.into_bound(py)))), Err(_) => Python::with_gil(|_py| Err(pyo3::exceptions::PyRuntimeError::new_err("Asyncio dropped"))), } } } Err(e) => Err(e), } } else { exec_res };
+
+    Python::with_gil(|py| -> (u16, String, HashMap<String, String>) {
+        match py_result {
+            Ok(py_obj) => {
+                if let Ok(resp) = py_obj.downcast_bound::<PyResponse>(py) { let resp_ref = resp.borrow(); let status = resp_ref.status_code; let headers = resp_ref.headers.clone(); let body_str = if raw_string { if resp_ref.content.is_none(py) { String::new() } else if let Ok(s) = resp_ref.content.downcast_bound::<PyString>(py) { s.to_string() } else { serializer.bind(py).call1((&resp_ref.content,)).unwrap().extract().unwrap_or_default() } } else { serializer.bind(py).call1((&resp_ref.content,)).unwrap().extract().unwrap_or_default() }; return (status, body_str, headers); }
+                let body_str = if raw_string { if py_obj.is_none(py) { String::new() } else if let Ok(s) = py_obj.downcast_bound::<PyString>(py) { s.to_string() } else { serializer.bind(py).call1((py_obj,)).unwrap().extract().unwrap_or_default() } } else { serializer.bind(py).call1((py_obj,)).unwrap().extract().unwrap_or_default() };
+                (200, body_str, HashMap::new())
+            }
+            Err(err) => {
+                // INTERCEPT 422 VALIDATION ERRORS
+                let err_str = err.to_string();
+                if err_str.contains("422:") { let clean_err = err_str.split("422: ").last().unwrap_or(&err_str).replace('"', "'"); (422, format!(r#"{{"detail":"{}"}}"#, clean_err), HashMap::new()) } 
+                else { (500, format!(r#"{{"detail":"{}"}}"#, err_str.replace('"', "'")), HashMap::new()) }
+            }
+        }
+    })
+}
+
 #[pyclass] struct RouteDecorator { routes: Routes, method: String, path: String, is_ws: bool }
 #[allow(non_local_definitions)]
 #[pymethods]
@@ -518,6 +520,53 @@ impl RouteDecorator {
 #[pyclass] struct PromptDecorator { prompts: Prompts, name: Option<String>, description: Option<String> }
 #[allow(non_local_definitions)] #[pymethods] impl PromptDecorator { fn __call__(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<Py<PyAny>> { let is_async = py.import_bound("inspect")?.getattr("iscoroutinefunction")?.call1((func.bind(py),))?.extract()?; self.prompts.lock().unwrap().push(PromptEntry { name: self.name.clone().unwrap_or_else(|| func.bind(py).getattr("__name__").unwrap().extract().unwrap()), description: self.description.clone().unwrap_or_default(), handler: func.clone_ref(py), _is_async: is_async, }); Ok(func) } }
 
-#[pymodule] fn _rustapi(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pymodule]
+fn _rustapi(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Engine>()?; m.add_class::<PyRequest>()?; m.add_class::<PyResponse>()?; m.add_class::<PyUploadFile>()?; m.add_class::<PyWebSocket>()?; m.add_class::<EventDecorator>()?; Ok(())
 }
+"""
+
+with open("src/lib.rs", "w") as f:
+    f.write(rust_code)
+    
+test_append = """
+# ---------------------------------------------------------
+# TEST PHASE 5: Lifespan Hooks & Parameter Coercion
+# ---------------------------------------------------------
+lifespan_state = {"startup": False, "shutdown": False}
+
+@app.on_event("startup")
+def on_startup():
+    logger.info("--> Executing Rust-Triggered Startup Hook")
+    lifespan_state["startup"] = True
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    logger.info("--> Executing Rust-Triggered Shutdown Hook")
+    lifespan_state["shutdown"] = True
+
+@app.get("/calc/{a}")
+def calculate(a: int, b: float, active: bool):
+    return {"a": a, "b": b, "active": active}
+
+def test_lifespan_startup():
+    assert lifespan_state["startup"] is True, "Startup hook did not fire!"
+
+def test_parameter_coercion_success():
+    res = requests.get(f"{BASE}/calc/42?b=3.14&active=true")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["a"] == 42
+    assert data["b"] == 3.14
+    assert data["active"] is True
+
+def test_parameter_coercion_failure_422():
+    res = requests.get(f"{BASE}/calc/not-an-int?b=3.14&active=true")
+    assert res.status_code == 422
+    assert "must be an integer" in res.json().get("detail", "")
+"""
+
+with open("tests/testbasic.py", "a") as f:
+    f.write(test_append)
+
+print("✅ Phase 5 Code & Tests Successfully Injected!")
