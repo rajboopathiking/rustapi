@@ -61,6 +61,29 @@ other Python web framework — that part doesn't change unless you write a
 handler as a native `#[pyfunction]` yourself (see `rustapi.compute` for an
 example of that pattern).
 
+## Architectural Boundaries & Trade-Offs
+
+To maintain maximum performance, RustAPI strictly adheres to the following constraints:
+
+```
+1).  No ASGI Middleware: RustAPI does not run under Uvicorn/Gunicorn. Core middleware (Auth, CORS, Logging) must run in the Rust layer to preserve speed.
+```
+
+```
+2). The Python GIL Ceiling: RustAPI eliminates framework overhead, but cannot magically speed up poorly written Python code. CPU-heavy Python loops will block a thread. Phase 4 features must be used to bypass the GIL for heavy computing.
+```
+
+   ## 5. Performance Slider
+
+
+   ```
+
+   1.  **Tier 1 (Orchestrator):** Write in **Pure Python** for maximum developer speed.                                                                                                 
+   2.  **Tier 2 (Hybrid):** Use **Rust-Native Modules** for heavy I/O and Serialization (The **default mode** for high performance - **Recommended**).                                                      
+   3.  **Tier 3 (Turbo):** Write custom **Rust Hot-Paths** for extreme computational requirements.          
+
+   ``` 
+
 ## License
 
 MIT
