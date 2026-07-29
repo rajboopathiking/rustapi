@@ -17,6 +17,15 @@ def test_public_package_exports_work():
     assert response.content == {"ok": True}
 
 
+def test_pyrustapi_alias_import_works():
+    import pyrustapi
+
+    assert pyrustapi.Engine is not None
+    assert pyrustapi.Response is not None
+    assert pyrustapi.HTTPException is not None
+    assert pyrustapi.Depends is not None
+
+
 def test_repo_root_import_prefers_workspace_package():
     repo_root = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
@@ -26,7 +35,7 @@ def test_repo_root_import_prefers_workspace_package():
         [
             sys.executable,
             "-c",
-            "import rustapi; from rustapi import APIRouter; print(rustapi.__file__)",
+            "import rustapi; from rustapi import APIRouter; import pyrustapi; print(rustapi.__file__)",
         ],
         cwd=repo_root,
         capture_output=True,
@@ -37,3 +46,4 @@ def test_repo_root_import_prefers_workspace_package():
 
     assert result.returncode == 0, result.stderr
     assert "rustapi" in result.stdout and "__init__.py" in result.stdout
+

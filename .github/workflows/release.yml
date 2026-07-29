@@ -7,10 +7,32 @@ on:
 
 jobs:
   # ---------------------------------------------------
-  # STAGE 1: Build the Wheels on all Operating Systems
+  # STAGE 1: Build Source Distribution (sdist)
+  # ---------------------------------------------------
+  build-sdist:
+    name: Build Source Distribution (sdist)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      - name: Save sdist as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  # ---------------------------------------------------
+  # STAGE 2: Build Wheels on all Operating Systems & Architectures
   # ---------------------------------------------------
   build-wheels:
-    name: Build Wheels (${{ matrix.platform.target }})
+    name: Build Wheels (${{ matrix.platform.os }} - ${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
@@ -18,6 +40,10 @@ jobs:
         platform:
           - os: ubuntu-latest
             target: x86_64
+            manylinux: auto
+          - os: ubuntu-latest
+            target: aarch64
+            manylinux: auto
           - os: macos-latest
             target: x86_64
           - os: macos-latest
@@ -34,10 +60,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build Wheels (No virtualenv required)
+      - name: Build Wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux || '' }}
           command: build
           args: --release --out dist
 
@@ -48,18 +75,18 @@ jobs:
           path: dist
 
   # ---------------------------------------------------
-  # STAGE 2: Publish all collected wheels to PyPI
+  # STAGE 3: Publish all collected wheels & sdist to PyPI
   # ---------------------------------------------------
   publish:
     name: Publish to PyPI
-    needs: build-wheels  # Wait for all OS builds to finish successfully
+    needs: [build-sdist, build-wheels]
     runs-on: ubuntu-latest
     steps:
-      - name: Download all built wheels
+      - name: Download all built artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: wheels-*
+          pattern: '*'
           merge-multiple: true
 
       - name: Publish to PyPI
