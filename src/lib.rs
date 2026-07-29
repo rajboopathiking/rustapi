@@ -79,7 +79,7 @@ struct RouteEntry {
     is_async: bool,
     pydantic_model: Option<Py<PyAny>>,
     pydantic_param_name: Option<String>,
-    _request_schema_json: Option<String>,
+    request_schema_json: Option<String>,
     request_param_name: Option<String>,
     background_task_param_name: Option<String>,
     websocket_param_name: Option<String>,
@@ -204,9 +204,58 @@ fn compute_websocket_accept(key: &str) -> String {
 
 fn generate_openapi(routes: &[RouteEntry]) -> String {
     let mut paths = serde_json::Map::new();
+    let mut components_schemas = serde_json::Map::new();
+
     for r in routes {
         if r.is_websocket { continue; }
         let mut method_obj = json!({ "responses": { "200": { "description": "Successful Response" } } });
+
+        // Parameters (path and query)
+        let mut parameters = Vec::new();
+
+        for seg in &r.segments {
+            if let Segment::Param(ref name) = seg {
+                let ptype = match r.param_types.get(name) {
+                    Some(ParamType::Int) => "integer",
+                    Some(ParamType::Float) => "number",
+                    Some(ParamType::Bool) => "boolean",
+                    _ => "string",
+                };
+                parameters.push(json!({
+                    "name": name,
+                    "in": "path",
+                    "required": true,
+                    "schema": { "type": ptype }
+                }));
+            }
+        }
+
+        for req_p in &r.required_params {
+            let is_path_param = r.segments.iter().any(|s| matches!(s, Segment::Param(p_name) if p_name == req_p));
+            let is_pydantic_param = r.pydantic_param_name.as_ref().map(|p| p == req_p).unwrap_or(false);
+            let is_req_param = r.request_param_name.as_ref().map(|p| p == req_p).unwrap_or(false) || req_p == "req" || req_p == "request";
+            let is_bg_param = r.background_task_param_name.as_ref().map(|p| p == req_p).unwrap_or(false);
+
+            if !is_path_param && !is_pydantic_param && !is_req_param && !is_bg_param {
+                let ptype = match r.param_types.get(req_p) {
+                    Some(ParamType::Int) => "integer",
+                    Some(ParamType::Float) => "number",
+                    Some(ParamType::Bool) => "boolean",
+                    _ => "string",
+                };
+                parameters.push(json!({
+                    "name": req_p,
+                    "in": "query",
+                    "required": true,
+                    "schema": { "type": ptype }
+                }));
+            }
+        }
+
+        if !parameters.is_empty() {
+            method_obj["parameters"] = serde_json::Value::Array(parameters);
+        }
+
         if matches!(r.method.as_str(), "POST" | "PUT" | "PATCH") {
             if r.original_path.contains("upload") {
                 method_obj["requestBody"] = json!({
@@ -216,10 +265,55 @@ fn generate_openapi(routes: &[RouteEntry]) -> String {
                         "description": { "type": "string" }
                     }}}}
                 });
-            } else {
+            } else if let Some(ref schema_str) = r.request_schema_json {
+                if let Ok(schema_val) = serde_json::from_str::<serde_json::Value>(schema_str) {
+                    let schema_str_clean = schema_val.to_string().replace("#/$defs/", "#/components/schemas/");
+                    if let Ok(mut clean_val) = serde_json::from_str::<serde_json::Value>(&schema_str_clean) {
+                        if let Some(defs) = clean_val.as_object_mut().and_then(|obj| obj.remove("$defs")) {
+                            if let Some(defs_map) = defs.as_object() {
+                                for (k, v) in defs_map {
+                                    let mut sub_schema = v.clone();
+                                    if let Some(sub_obj) = sub_schema.as_object_mut() {
+                                        sub_obj.remove("additionalProperties");
+                                    }
+                                    components_schemas.insert(k.clone(), sub_schema);
+                                }
+                            }
+                        }
+                        if let Some(obj) = clean_val.as_object_mut() {
+                            obj.remove("additionalProperties");
+                        }
+                        let model_name = clean_val.get("title")
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string());
+
+                        if let Some(name) = model_name {
+                            components_schemas.insert(name.clone(), clean_val);
+                            method_obj["requestBody"] = json!({
+                                "required": true,
+                                "content": {
+                                    "application/json": {
+                                        "schema": { "$ref": format!("#/components/schemas/{}", name) }
+                                    }
+                                }
+                            });
+                        } else {
+                            method_obj["requestBody"] = json!({
+                                "required": true,
+                                "content": { "application/json": { "schema": clean_val } }
+                            });
+                        }
+                    } else {
+                        method_obj["requestBody"] = json!({
+                            "required": true,
+                            "content": { "application/json": { "schema": schema_val } }
+                        });
+                    }
+                }
+            } else if r.pydantic_param_name.is_some() || r.request_param_name.is_some() {
                 method_obj["requestBody"] = json!({
                     "required": true,
-                    "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+                    "content": { "application/json": { "schema": { "type": "object", "example": {} } } }
                 });
             }
         }
@@ -230,11 +324,18 @@ fn generate_openapi(routes: &[RouteEntry]) -> String {
             paths.insert(r.original_path.clone(), json!({ method_lower: method_obj }));
         }
     }
-    serde_json::to_string(&json!({
+
+    let mut doc = json!({
         "openapi": "3.0.0",
         "info": { "title": "RustAPI", "version": "0.1.0" },
         "paths": paths
-    })).unwrap()
+    });
+
+    if !components_schemas.is_empty() {
+        doc["components"] = json!({ "schemas": components_schemas });
+    }
+
+    serde_json::to_string(&doc).unwrap()
 }
 
 fn swagger_html() -> String {
@@ -1740,6 +1841,19 @@ impl RouteDecorator {
         let mut param_names                = Vec::new();
         let mut param_types                = HashMap::new();
 
+        let func_bound = func.bind(py);
+        let func_globals = func_bound.getattr("__globals__").ok();
+
+        let type_hints = if let Ok(typing) = py.import_bound("typing") {
+            if let Some(ref g) = func_globals {
+                typing.call_method1("get_type_hints", (func_bound, g)).ok()
+            } else {
+                typing.call_method1("get_type_hints", (func_bound,)).ok()
+            }
+        } else {
+            None
+        };
+
         if let Ok(values) = params.call_method0("values") {
             if let Ok(iter) = values.iter() {
                 for p_res in iter {
@@ -1761,8 +1875,57 @@ impl RouteDecorator {
                         .map(|d| d.to_string().contains("_empty"))
                         .unwrap_or(true);
 
-                    if let Ok(annotation) = p.getattr("annotation") {
-                        if let Ok(name) = annotation.getattr("__name__") {
+                    let param_ann = if let Some(ref hints) = type_hints {
+                        hints.get_item(&param_name).ok().or_else(|| p.getattr("annotation").ok())
+                    } else {
+                        p.getattr("annotation").ok()
+                    };
+
+                    if let Some(annotation) = param_ann {
+                        let mut target_ann = annotation.clone();
+
+                        if let Ok(str_name) = target_ann.extract::<String>() {
+                            if let Some(ref g) = func_globals {
+                                if let Ok(val) = g.get_item(&str_name) {
+                                    target_ann = val;
+                                }
+                            }
+                        }
+
+                        if let Ok(args) = target_ann.getattr("__args__") {
+                            if let Ok(first_arg) = args.get_item(0) {
+                                target_ann = first_arg;
+                            }
+                        }
+
+                        let has_mjs = target_ann.hasattr("model_json_schema").unwrap_or(false);
+                        let has_sch = target_ann.hasattr("schema").unwrap_or(false);
+
+                        if has_mjs {
+                            pydantic_model      = Some(target_ann.clone().into());
+                            pydantic_param_name = Some(param_name.clone());
+                            if let Ok(schema_dict) = target_ann.call_method0("model_json_schema") {
+                                if let Ok(schema_str) = py.import_bound("json")?.call_method1("dumps", (schema_dict,)) {
+                                    if let Ok(s) = schema_str.extract::<String>() {
+                                        request_schema_json = Some(s);
+                                    }
+                                }
+                            }
+                            continue;
+                        } else if has_sch {
+                            pydantic_model      = Some(target_ann.clone().into());
+                            pydantic_param_name = Some(param_name.clone());
+                            if let Ok(schema_dict) = target_ann.call_method0("schema") {
+                                if let Ok(schema_str) = py.import_bound("json")?.call_method1("dumps", (schema_dict,)) {
+                                    if let Ok(s) = schema_str.extract::<String>() {
+                                        request_schema_json = Some(s);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
+                        if let Ok(name) = target_ann.getattr("__name__") {
                             let type_name: String = name.extract().unwrap_or_default();
                             if type_name == "BackgroundTasks" {
                                 background_task_param_name = Some(param_name.clone());
@@ -1775,18 +1938,6 @@ impl RouteDecorator {
                                 _       => ParamType::String,
                             };
                             param_types.insert(param_name.clone(), pt);
-                        }
-                        if annotation.hasattr("model_json_schema").unwrap_or(false) {
-                            pydantic_model      = Some(annotation.clone().into());
-                            pydantic_param_name = Some(param_name.clone());
-                            if let Ok(schema_dict) = annotation.call_method0("model_json_schema") {
-                                if let Ok(schema_str) = py.import_bound("json")?.call_method1("dumps", (schema_dict,)) {
-                                    if let Ok(s) = schema_str.extract::<String>() {
-                                        request_schema_json = Some(s);
-                                    }
-                                }
-                            }
-                            continue;
                         }
                     }
 
@@ -1828,7 +1979,7 @@ impl RouteDecorator {
         self.routes.lock().unwrap().push(RouteEntry {
             method: self.method.clone(), original_path: self.path.clone(),
             segments: parse_pattern(&self.path), handler: func.clone_ref(py), is_async,
-            pydantic_model, pydantic_param_name, _request_schema_json: request_schema_json,
+            pydantic_model, pydantic_param_name, request_schema_json,
             request_param_name, background_task_param_name, websocket_param_name,
             is_websocket: self.is_ws, dependencies, param_names, param_types, required_params,
             response_model: self.response_model.as_ref().map(|m| m.clone_ref(py)),
