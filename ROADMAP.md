@@ -1,63 +1,78 @@
 # 🚀 RustAPI Engineering Roadmap
 
-This document tracks the verified state of RustAPI and the phased implementation plan to reach full feature-parity with production Python frameworks (like FastAPI) without sacrificing Rust's native speed.
+This document tracks the verified state and architecture of **RustAPI** — a **Native-Rust First Framework** designed to deliver full feature parity with Python frameworks (like FastAPI) while running core business logic, database queries, security primitives, and high-speed routing directly in native Rust.
 
 ---
 
-## §0. Ground Truth (Completed & Verified)
+## §0. Ground Truth & Architecture (Completed & Verified)
 
-- [x] **Hyper HTTP Engine & Radix Routing:** Core TCP socket binding, high-speed URL matching.
-- [x] **Sync/Async Route Offloading:** `def` and `async def` routes executing securely inside Tokio pool.
-- [x] **HTTP Essentials & OpenAPI:** All standard methods (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`), CORS, `/docs` (Swagger UI), and `/openapi.json`.
-- [x] **Phase 1: HTTP Metadata & Error Handling:** `req.headers`, `req.cookies`, `Response` objects, structured `HTTPException`, and automatic 422 validation via Pydantic.
-- [x] **Phase 2: Dependency Injection & Generators:** FastAPI-style `Depends`, generator setup/teardown hooks with request-scoped caching.
-- [x] **Phase 5: Production Ergonomics:** Modular routing via `APIRouter` and lifespan hooks (`@app.on_event("startup")` / `"shutdown"`).
-- [x] **Advanced I/O & Real-Time:** Chunked `StreamingResponse`, native multipart file uploads (`UploadFile`), and WebSockets (`WebSocket`).
-- [x] **MCP Integration:** Model Context Protocol tools (`@app.tool()`), resources (`@app.resource()`), and prompts (`@app.prompt()`) at `POST /mcp`.
+RustAPI follows a **3-Tier Architecture** that combines FastAPI's intuitive Python surface with high-performance native Rust execution engines.
 
----
-
-## 🎯 NEXT IMPLEMENTATION PHASES (Ordered: Simple ➔ Complex)
-
-### 🟢 Phase A: Quick Wins & Testing Utilities (Simple)
-*Goal: Bridge remaining API ergonomics for testing and data filtering.*
-
-- [x] **A.1 Dependency Overrides (`app.dependency_overrides`):**
-  - Add `engine.dependency_overrides` dictionary allowing tests to swap dependencies (e.g. `app.dependency_overrides[get_db] = get_test_db`).
-- [x] **A.2 Response Model Filtering (`response_model=...`):**
-  - Support `@app.get("/", response_model=UserOut)` to validate & filter handler return values through a Pydantic schema before serialization.
-- [x] **A.3 Strict Parameter Type Coercion:**
-  - Auto-convert path/query params to `int`, `float`, `bool` based on Python type hints, returning structured 422 errors on mismatch or missing required parameters.
+### ⚡ 1. Native-Rust First Framework & Business Logic Engine
+- [x] **Tier 3 Rust-Native Routes (`app.add_native_route`):** Pure Rust HTTP fast-paths executing 100% inside Tokio & Hyper in compiled machine code, completely bypassing the CPython interpreter and GIL (**50,000+ req/sec**).
+- [x] **PyO3 Native Business Logic Support:** Ability to write compiled Rust PyO3 C-extensions (`py.allow_threads`) for heavy CPU-bound business logic, offloading compute out of Python's GIL.
+- [x] **Hyper HTTP Engine & Radix Router:** High-concurrency TCP socket handling, zero-copy header parsing, and low-latency URL matching natively in Rust.
+- [x] **Sync & Async Handler Offloading:** Native execution of `def` and `async def` Python route handlers managed securely by Tokio worker pools.
 
 ---
 
-### 🟡 Phase B: Rust-Native Database Engine (Medium-Complex)
-*Goal: Bypass the Python GIL and standard ORM overhead for high-concurrency database queries.*
-
-- [x] **B.1 Native Rust Connection Pool:** Embed `sqlx` inside `Engine` for high-concurrency PostgreSQL/SQLite connection pooling.
-- [x] **B.2 Zero-Copy JSON Streaming:** Execute SQL natively in Rust and stream UTF-8 JSON bytes directly to the client socket (skipping Python dict & Pydantic allocations entirely).
-- [x] **B.3 Python Orchestration API:** Expose `app.connect_db()` and `db.query_json()` / `db.execute()` to the Python layer.
+### 🗄️ 2. Rust-Native Database Engine
+- [x] **Native Rust Connection Pooling (`sqlx`):** High-concurrency PostgreSQL and SQLite connection pooling embedded directly inside the `Engine` via `app.connect_db()`.
+- [x] **Zero-Copy JSON Streaming (`db.query_json()`):** SQL queries execute natively in Rust and stream UTF-8 JSON bytes directly to client sockets, bypassing Python dict and Pydantic object allocation overhead.
+- [x] **Python DB Orchestration API:** Direct methods `db.execute()`, `db.fetch_one()`, and `db.fetch_all()` exposed to Python handlers.
 
 ---
 
-### 🔴 Phase C: Embedded High-Performance Rust Power Modules (Complex)
-*Goal: Provide instant, zero-dependency, ultra-fast primitives natively in Rust for security, templating, and memory efficiency.*
-
-- [x] **C.1 Rust JWT Engine (`jsonwebtoken`):** Native `encode_jwt()` / `decode_jwt()` inside Rust, bypassing Python `pyjwt` latency.
-- [x] **C.2 High-Speed Password Hashing (`argon2`):** Embedded `hash_password()` and `verify_password()` natively running on Tokio blocking worker pools.
-- [x] **C.3 Native Template Renderer (`minijinja`):** Jinja2-compatible template engine executing directly in Rust memory.
-- [x] **C.4 High-Performance Allocator & Data Structures:** Integrate `mimalloc` and lock-free `DashMap` for maximum multi-threaded throughput.
+### 🔐 3. Embedded Rust Power Modules (Zero Dependency)
+- [x] **Rust JWT Engine (`jsonwebtoken`):** Native `encode_jwt()` and `decode_jwt()` functions inside Rust, eliminating Python `pyjwt` latency.
+- [x] **High-Speed Password Hashing (`argon2`):** Embedded `hash_password()` and `verify_password()` executing on Tokio blocking worker pools.
+- [x] **Native Template Renderer (`minijinja`):** Jinja2-compatible template engine rendering directly inside Rust memory.
+- [x] **High-Performance Memory & Concurrent Maps:** Integrated `mimalloc` memory allocator and lock-free `DashMap` for multi-threaded state management.
 
 ---
 
-### 🔵 Phase D: Native Request Telemetry & Access Logging (Completed)
-*Goal: Provide Uvicorn/FastAPI-style real-time terminal access logs with zero runtime performance cost.*
+### 🛠️ 4. FastAPI Feature Parity & Ergonomics
+- [x] **HTTP Method Routing & APIRouter:** Support for `@app.get`, `@app.post`, `@app.put`, `@app.delete`, `@app.patch`, and modular `APIRouter` mounting.
+- [x] **Dependency Injection System (`Depends`):** Full FastAPI-compatible dependency resolution, generator setup/teardown hooks, request-scoped caching, and test overrides (`app.dependency_overrides`).
+- [x] **Response Model Filtering & Validation (`response_model=...`):** Schema validation and field filtering using Pydantic models before response serialization.
+- [x] **Strict Parameter Type Coercion:** Automatic casting of path and query params (`int`, `float`, `bool`) with structured 422 HTTP validation error responses.
+- [x] **Request & Response Ergonomics:** `req.json()`, `req.body`, `req.headers`, `req.cookies`, `JSONResponse`, `HTMLResponse`, `PlainTextResponse`, `RedirectResponse`, `StreamingResponse`, `UploadFile`, and `WebSocket`.
+- [x] **OpenAPI & Interactive Docs:** Automatic `/openapi.json` generation and embedded Swagger UI at `/docs`.
+- [x] **Native Telemetry & Access Logging:** Real-time terminal request access logs (`INFO: 127.0.0.1 - "GET /docs HTTP/1.1" 200 - 0.85ms`).
+- [x] **Model Context Protocol (MCP) Server:** Embedded MCP tools (`@app.tool()`), resources (`@app.resource()`), and prompts (`@app.prompt()`) accessible at `POST /mcp`.
 
-- [x] **D.1 Native Hyper Access Logger:** Automatically logs remote IP, HTTP method, request path, status code, and latency in milliseconds for every request (`INFO: 127.0.0.1:54321 - "GET /docs HTTP/1.1" 200 - 0.85ms`).
+---
+
+## 🎯 IMPLEMENTATION PHASES & VERIFICATION (Completed)
+
+### 🟢 Phase A: Quick Wins & Testing Utilities
+- [x] **A.1 Dependency Overrides (`app.dependency_overrides`):** Swap dependencies during testing (e.g., mock database connections).
+- [x] **A.2 Response Model Filtering (`response_model=...`):** Validate & filter return dictionaries via Pydantic schemas.
+- [x] **A.3 Strict Parameter Type Coercion:** Validate path/query types and yield automatic 422 error payloads.
+
+---
+
+### 🟡 Phase B: Rust-Native Database Engine
+- [x] **B.1 Native Rust Connection Pool:** Integrated `sqlx` inside `Engine` for PostgreSQL/SQLite.
+- [x] **B.2 Zero-Copy JSON Streaming:** Direct socket streaming of SQL query results as JSON.
+- [x] **B.3 Python Orchestration API:** Exposed `app.connect_db()` and `db.query_json()` / `db.execute()`.
+
+---
+
+### 🔴 Phase C: Embedded High-Performance Rust Power Modules
+- [x] **C.1 Rust JWT Engine (`jsonwebtoken`):** Native `encode_jwt()` / `decode_jwt()`.
+- [x] **C.2 High-Speed Password Hashing (`argon2`):** Embedded Argon2 password hashing.
+- [x] **C.3 Native Template Renderer (`minijinja`):** Jinja2-compatible template engine in Rust.
+- [x] **C.4 High-Performance Allocator & Data Structures:** Integrated `mimalloc` and `DashMap`.
+
+---
+
+### 🔵 Phase D: Native Request Telemetry & Access Logging
+- [x] **D.1 Native Hyper Access Logger:** Terminal access logging for remote IP, HTTP method, path, status, and latency.
 
 ---
 
 ## § Architectural Boundaries & Trade-Offs
 
-- **No ASGI Middleware:** RustAPI does not run under Uvicorn/Gunicorn. Core middleware (Auth, CORS, Logging) runs in the Rust layer to preserve speed.
-- **The Python GIL Ceiling:** RustAPI eliminates framework overhead. Heavy CPU-bound Python loops should leverage Phase C Rust modules to bypass the GIL.
+- **No ASGI Middleware Overhead:** RustAPI does not run under Uvicorn or Starlette. Core middleware (CORS, Auth, Telemetry, Logging) runs directly in the Rust layer to maximize speed.
+- **The Python GIL Ceiling & Native Fast-Paths:** RustAPI eliminates framework overhead. Heavy CPU-bound business logic and database hot-paths can leverage Tier 3 Native Routes (`app.add_native_route`), native DB streaming, or PyO3 C-extensions to completely bypass the GIL.

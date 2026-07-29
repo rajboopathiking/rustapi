@@ -25,16 +25,18 @@
 
 ## 📚 Documentation Reference
 
-Detailed documentation is available in the [`docs/`](docs/) directory:
+Detailed documentation is available in the [`docs/`](docs/) directory and project reference:
 
-- [Getting Started & Core Routing](docs/getting_started.md)
-- [3-Tier Architecture & Benchmarks Guide](docs/3tier_architecture_and_benchmarks.md)
-- [Tier 3 Rust-Native Business Logic Guide](docs/native_business_logic.md)
-- [Rust-Native Database Engine](docs/database_engine.md)
-- [Embedded Rust Power Primitives (JWT, Argon2, MiniJinja)](docs/power_primitives.md)
-- [Model Context Protocol (MCP) Server](docs/mcp_server.md)
-- [Response Types & Request Ergonomics](docs/response_types.md)
-- [Empirical Performance Benchmark Report](performance-reports/fastapi_vs_hybrid_vs_native.md)
+- [🚀 Engineering Roadmap](ROADMAP.md)
+- [📖 Getting Started & Core Routing](docs/getting_started.md)
+- [📚 Complete API & Migration Guide](docs/docs.md)
+- [🏛️ 3-Tier Architecture Guide](docs/3tier_architecture_and_benchmarks.md)
+- [⚡ Tier 3 Rust-Native Business Logic Guide](docs/native_business_logic.md)
+- [🗄️ Rust-Native Database Engine](docs/database_engine.md)
+- [🔐 Embedded Rust Power Primitives (JWT, Argon2, MiniJinja)](docs/power_primitives.md)
+- [🤖 Model Context Protocol (MCP) Server](docs/mcp_server.md)
+- [📦 Response Types & Request Ergonomics](docs/response_types.md)
+- [📊 Empirical Performance Benchmark Report](performance-reports/fastapi_vs_hybrid_vs_native.md)
 
 ---
 
