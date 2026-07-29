@@ -44,12 +44,15 @@ jobs:
           - os: ubuntu-latest
             target: aarch64
             manylinux: auto
+            continue_on_error: true
           - os: macos-latest
             target: x86_64
           - os: macos-latest
             target: aarch64
           - os: windows-latest
             target: x64
+
+    continue-on-error: ${{ matrix.platform.continue_on_error || false }}
 
     steps:
       - name: Checkout repository
@@ -60,11 +63,15 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Set up QEMU (for ARM64 cross-compilation)
+        if: matrix.platform.target == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+
       - name: Build Wheels
         uses: PyO3/maturin-action@v1
         env:
-          CFLAGS_aarch64_unknown_linux_gnu: "-march=armv8-a"
-          CFLAGS_aarch64_unknown_linux_musl: "-march=armv8-a"
+          CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8 -march=armv8-a"
+          CFLAGS_aarch64_unknown_linux_musl: "-D__ARM_ARCH=8 -march=armv8-a"
         with:
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux || '' }}
@@ -83,6 +90,7 @@ jobs:
   publish:
     name: Publish to PyPI
     needs: [build-sdist, build-wheels]
+    if: always() && needs.build-sdist.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Download all built artifacts
