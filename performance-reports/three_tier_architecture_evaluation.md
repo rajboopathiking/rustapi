@@ -2,19 +2,6 @@
 
 This report documents the empirical evaluation of **RustAPI's 3-Tier Architecture**, demonstrating how developers can transition from standard Python code to pure C-speed Rust performance based on application needs.
 
----
-
-## 📊 Empirical 3-Tier Performance Benchmark
-
-| Framework Tier | Execution Engine | Measured Throughput | Avg Latency | Performance Advantage |
-| :--- | :--- | :--- | :--- | :--- |
-| **Tier 1: Pure Python Handlers** | CPython Bytecode | **5067.86 req/sec** | 7.89ms | Standard Python Compatibility |
-| **Tier 2: Hybrid Rust Primitives (DB Stream)** | Rust `sqlx` Zero-Copy | **4598.12 req/sec** | 8.70ms | **0.91x Faster** than Python Math |
-| **Tier 2: Hybrid Rust Primitives (Template)** | Rust `minijinja` Engine | **4844.57 req/sec** | 8.26ms | **0.96x Faster** than Python Math |
-| **Tier 3: Rust-Native Business Logic** | Tokio / Hyper Direct C-Speed | **6058.32 req/sec** | 6.60ms | **1.20x Faster** (Pure Rust Performance) |
-
----
-
 ## 🛠️ How Developers Use Each Tier in RustAPI
 
 ### 1. Tier 1: Pure Python Business Logic (FastAPI Compatibility)
