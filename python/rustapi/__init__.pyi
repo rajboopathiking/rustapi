@@ -27,6 +27,7 @@ class PyRequest:
         files: Dict[str, List[UploadFile]],
         body: str,
     ) -> None: ...
+    def json(self) -> Any: ...
 
 class Response:
     """Explicit HTTP response wrapper allowing custom content, status code, and headers."""
@@ -39,6 +40,46 @@ class Response:
         self,
         content: Any = None,
         status_code: int = 200,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> None: ...
+
+class HTMLResponse(Response):
+    """HTML response wrapper automatically setting Content-Type: text/html."""
+
+    def __init__(
+        self,
+        content: str = "",
+        status_code: int = 200,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> None: ...
+
+class JSONResponse(Response):
+    """JSON response wrapper automatically setting Content-Type: application/json."""
+
+    def __init__(
+        self,
+        content: Any = None,
+        status_code: int = 200,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> None: ...
+
+class PlainTextResponse(Response):
+    """Plain text response wrapper automatically setting Content-Type: text/plain."""
+
+    def __init__(
+        self,
+        content: str = "",
+        status_code: int = 200,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> None: ...
+
+class RedirectResponse(Response):
+    """HTTP redirect response wrapper setting Location header."""
+
+    def __init__(
+        self,
+        url: str,
+        status_code: int = 307,
         headers: Optional[Dict[str, str]] = None,
     ) -> None: ...
 
@@ -168,3 +209,10 @@ class Engine:
         reload: bool = False,
         workers: int = 1,
     ) -> None: ...
+
+# ---- Embedded Rust Power Primitives ----
+def encode_jwt(claims: Dict[str, Any], secret: str, algorithm: Optional[str] = None) -> str: ...
+def decode_jwt(token: str, secret: str, algorithm: Optional[str] = None) -> Dict[str, Any]: ...
+def hash_password(password: str) -> str: ...
+def verify_password(password: str, hash: str) -> bool: ...
+def render_template(template_str: str, context: Dict[str, Any]) -> str: ...

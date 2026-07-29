@@ -102,6 +102,38 @@ type Tools     = Arc<StdMutex<Vec<ToolEntry>>>;
 type Resources = Arc<StdMutex<Vec<ResourceEntry>>>;
 type Prompts   = Arc<StdMutex<Vec<PromptEntry>>>;
 
+#[derive(Clone)]
+struct NativeRouteEntry {
+    method: String,
+    _original_path: String,
+    segments: Vec<Segment>,
+    body: String,
+    status_code: u16,
+    content_type: String,
+}
+
+type NativeRoutes = Arc<StdMutex<Vec<NativeRouteEntry>>>;
+
+fn match_native_route(routes: &[NativeRouteEntry], method: &str, path: &str) -> Option<NativeRouteEntry> {
+    let req_segs = path_segments(path);
+    for r in routes.iter() {
+        if r.method != method || r.segments.len() != req_segs.len() {
+            continue;
+        }
+        let mut ok = true;
+        for (seg, val) in r.segments.iter().zip(req_segs.iter()) {
+            match seg {
+                Segment::Literal(l) => {
+                    if l != val { ok = false; break; }
+                }
+                Segment::Param(_) => {}
+            }
+        }
+        if ok { return Some(r.clone()); }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Routing helpers
 // ---------------------------------------------------------------------------
@@ -296,7 +328,39 @@ struct PyRequest {
     #[pyo3(get)] body: String,
 }
 
-#[pyclass(name = "Response")]
+#[pymethods]
+impl PyRequest {
+    #[new]
+    #[pyo3(signature = (method, path, path_params, query_params, headers, cookies, form, files, body))]
+    fn new(
+        method: String,
+        path: String,
+        path_params: HashMap<String, String>,
+        query_params: HashMap<String, String>,
+        headers: HashMap<String, String>,
+        cookies: HashMap<String, String>,
+        form: HashMap<String, String>,
+        files: HashMap<String, Vec<PyUploadFile>>,
+        body: String,
+    ) -> Self {
+        PyRequest {
+            method, path, path_params, query_params, headers, cookies, form, files, body
+        }
+    }
+
+    #[pyo3(signature = ())]
+    fn json(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let trimmed = self.body.trim();
+        if trimmed.is_empty() {
+            let dict = pyo3::types::PyDict::new_bound(py);
+            return Ok(dict.unbind().into());
+        }
+        let py_json = py.import_bound("json")?;
+        py_json.call_method1("loads", (&self.body,)).map(|b| b.unbind())
+    }
+}
+
+#[pyclass(name = "Response", subclass)]
 struct PyResponse {
     #[pyo3(get)] content: PyObject,
     #[pyo3(get)] status_code: u16,
@@ -470,9 +534,8 @@ async fn execute_python_handler(
         match py_result {
             Ok(py_obj) => {
                 // Handle explicit Response wrapper.
-                if let Ok(resp) = py_obj.downcast_bound::<PyResponse>(py) {
-                    let resp_ref = resp.borrow();
-                    let status  = resp_ref.status_code;
+                if let Ok(resp_ref) = py_obj.extract::<PyRef<PyResponse>>(py) {
+                    let status = resp_ref.status_code;
                     let headers = resp_ref.headers.clone();
                     let is_raw = headers.get("content-type")
                         .or_else(|| headers.get("Content-Type"))
@@ -565,6 +628,7 @@ struct Engine {
     schedule_coro_fn: PyObject,
     startup_handlers: Handlers,
     shutdown_handlers: Handlers,
+    native_routes: NativeRoutes,
     #[pyo3(get, set)]
     dependency_overrides: PyObject,
     #[pyo3(get)]
@@ -617,6 +681,7 @@ def _schema_from_signature(func):
         let overrides = pyo3::types::PyDict::new_bound(py).unbind().into();
         Ok(Engine {
             routes:               Arc::new(StdMutex::new(Vec::new())),
+            native_routes:        Arc::new(StdMutex::new(Vec::new())),
             serializer:           module.getattr("_serialize_response")?.into(),
             filter_response_fn:   module.getattr("_filter_response")?.into(),
             schedule_coro_fn:     module.getattr("_schedule_coro")?.into(),
@@ -644,6 +709,20 @@ def _schema_from_signature(func):
     fn patch  (&self, path: String, response_model: Option<Py<PyAny>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "PATCH".into(),  path, is_ws: false, response_model } }
     #[pyo3(signature = (path))]
     fn websocket(&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "GET".into(), path, is_ws: true, response_model: None } }
+
+    #[pyo3(signature = (path, body, method="GET", status_code=200, content_type="application/json"))]
+    fn add_native_route(&self, path: String, body: String, method: &str, status_code: u16, content_type: &str) {
+        let segments = parse_pattern(&path);
+        let entry = NativeRouteEntry {
+            method: method.to_uppercase(),
+            _original_path: path,
+            segments,
+            body,
+            status_code,
+            content_type: content_type.to_string(),
+        };
+        self.native_routes.lock().unwrap().push(entry);
+    }
 
     // -- Rust-Native Database Engine ---------------------------------------
     #[pyo3(signature = (url))]
@@ -748,14 +827,28 @@ def _schema_from_signature(func):
             let executable: String = sys.getattr("executable")?.extract()?;
             let argv: Vec<String>  = sys.getattr("argv")?.extract()?;
 
+            if reload {
+                eprintln!("INFO:     Will watch for file changes in '.'");
+            }
+
             let exit_result: Result<(), PyErr> = py.allow_threads(move || {
+                struct ChildGuard(Vec<std::process::Child>);
+                impl Drop for ChildGuard {
+                    fn drop(&mut self) {
+                        for c in &mut self.0 {
+                            let _ = c.kill();
+                            let _ = c.wait();
+                        }
+                    }
+                }
+
                 let spawn_children = || -> Vec<std::process::Child> {
                     (0..safe_workers)
                         .map(|i| Command::new(&executable).args(&argv).env("RUSTAPI_WORKER", i.to_string()).spawn().unwrap())
                         .collect()
                 };
 
-                let mut children = spawn_children();
+                let mut guard = ChildGuard(spawn_children());
                 let (tx, rx) = std::sync::mpsc::channel();
                 let _watcher = if reload {
                     let mut w = notify::recommended_watcher(tx).unwrap();
@@ -769,8 +862,11 @@ def _schema_from_signature(func):
                     if reload {
                         if let Ok(Ok(event)) = rx.recv_timeout(Duration::from_millis(250)) {
                             if event.paths.iter().any(|p| p.extension().map_or(false, |e| e == "py")) {
-                                for mut c in children { let _ = c.kill(); let _ = c.wait(); }
-                                children = spawn_children();
+                                if let Some(changed_path) = event.paths.iter().find(|p| p.extension().map_or(false, |e| e == "py")) {
+                                    eprintln!("INFO:     Stat of file changed: {}. Reloading...", changed_path.display());
+                                }
+                                for mut c in guard.0.drain(..) { let _ = c.kill(); let _ = c.wait(); }
+                                guard.0 = spawn_children();
                                 continue;
                             }
                         }
@@ -778,7 +874,6 @@ def _schema_from_signature(func):
                         thread::sleep(Duration::from_millis(250));
                     }
                     if let Err(e) = Python::with_gil(|py| py.check_signals()) {
-                        for mut c in children { let _ = c.kill(); let _ = c.wait(); }
                         return Err(e);
                     }
                 }
@@ -805,12 +900,11 @@ def _schema_from_signature(func):
         let std_listener: std::net::TcpListener = socket.into();
         std_listener.set_nonblocking(true).unwrap();
 
-        if !is_worker {
-            eprintln!("INFO:     Started server process [{}]", std::process::id());
-            eprintln!("INFO:     RustAPI server running on http://{host}:{port} (Press CTRL+C to quit)");
-        }
+        eprintln!("INFO:     Started server process [{}]", std::process::id());
+        eprintln!("INFO:     RustAPI server running on http://{host}:{port} (Press CTRL+C to quit)");
 
         let routes                = self.routes.clone();
+        let native_routes         = self.native_routes.clone();
         let tools                 = self.tools.clone();
         let resources             = self.resources.clone();
         let prompts               = self.prompts.clone();
@@ -841,15 +935,42 @@ def _schema_from_signature(func):
                 run_lifecycle_handlers(&startup_handlers, &sc2, &sem2).await;
 
                 // Build and serve.
-                let make_svc = make_service_fn(move |_| {
-                    let (r, t, res, p, s, fr, sc, sem, do_arc) = (
-                        routes.clone(), tools.clone(), resources.clone(), prompts.clone(),
+                let make_svc = make_service_fn(move |conn: &hyper::server::conn::AddrStream| {
+                    let remote_addr = conn.remote_addr();
+                    let (r, nr, t, res, p, s, fr, sc, sem, do_arc) = (
+                        routes.clone(), native_routes.clone(), tools.clone(), resources.clone(), prompts.clone(),
                         serializer_arc.clone(), filter_response_arc.clone(), schedule_coro_arc.clone(), gil_semaphore.clone(),
                         dependency_overrides_arc.clone(),
                     );
                     async move {
                         Ok::<_, Infallible>(service_fn(move |req| {
-                            handle(req, r.clone(), s.clone(), fr.clone(), sc.clone(), t.clone(), res.clone(), p.clone(), sem.clone(), do_arc.clone())
+                            let start_time = std::time::Instant::now();
+                            let method = req.method().to_string();
+                            let uri_str = req.uri().path_and_query().map(|pq| pq.as_str().to_string()).unwrap_or_else(|| req.uri().path().to_string());
+                            let r2 = r.clone();
+                            let nr2 = nr.clone();
+                            let s2 = s.clone();
+                            let fr2 = fr.clone();
+                            let sc2 = sc.clone();
+                            let t2 = t.clone();
+                            let res2 = res.clone();
+                            let p2 = p.clone();
+                            let sem2 = sem.clone();
+                            let do_arc2 = do_arc.clone();
+
+                            async move {
+                                let resp = handle(req, r2, nr2, s2, fr2, sc2, t2, res2, p2, sem2, do_arc2).await;
+                                let duration = start_time.elapsed();
+                                let status_code = resp.as_ref().map(|res| res.status().as_u16()).unwrap_or(500);
+                                let duration_ms = duration.as_secs_f64() * 1000.0;
+                                if std::env::var("RUSTAPI_LOG").ok().as_deref() != Some("0") {
+                                    println!(
+                                        "INFO:     {} - \"{} {} HTTP/1.1\" {} - {:.2}ms",
+                                        remote_addr, method, uri_str, status_code, duration_ms
+                                    );
+                                }
+                                resp
+                            }
                         }))
                     }
                 });
@@ -942,6 +1063,7 @@ async fn run_lifecycle_handlers(
 async fn handle(
     mut req: HyperRequest<Body>,
     routes: Routes,
+    native_routes: NativeRoutes,
     serializer: Arc<PyObject>,
     filter_response: Arc<PyObject>,
     schedule_coro: Arc<PyObject>,
@@ -953,6 +1075,20 @@ async fn handle(
 ) -> Result<HyperResponse<Body>, Infallible> {
     let method      = req.method().to_string();
     let path        = req.uri().path().to_string();
+
+    let matched_native = {
+        let guard = native_routes.lock().unwrap();
+        match_native_route(&guard, &method, &path)
+    };
+    if let Some(entry) = matched_native {
+        let resp = HyperResponse::builder()
+            .status(entry.status_code)
+            .header("content-type", entry.content_type)
+            .body(Body::from(entry.body))
+            .unwrap();
+        return Ok(resp);
+    }
+
     let query_params = parse_query(req.uri().query());
 
     // Collect headers and cookies.
@@ -1807,36 +1943,40 @@ impl PyDatabase {
         let pg = self.pg_pool.clone();
 
         let json_str: String = py.allow_threads(move || {
-            get_db_rt().block_on(async move {
+            tokio::task::block_in_place(|| {
+                get_db_rt().block_on(async move {
                 if let Some(sqlite) = pool {
                     let rows = sqlx::query(&query).fetch_all(&sqlite).await
                         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-                    let mut records = Vec::new();
-                    for row in rows {
-                        let mut map = serde_json::Map::new();
-                        for col in row.columns() {
+                    let mut json = String::with_capacity(rows.len() * 128);
+                    json.push('[');
+                    for (i, row) in rows.iter().enumerate() {
+                        if i > 0 { json.push(','); }
+                        json.push('{');
+                        for (j, col) in row.columns().iter().enumerate() {
+                            if j > 0 { json.push(','); }
                             let col_name = col.name();
-                            let val: serde_json::Value = match row.try_get_raw(col_name) {
-                                Ok(raw) if !raw.is_null() => {
-                                    if let Ok(i) = row.try_get::<i64, _>(col_name) {
-                                        serde_json::Value::Number(i.into())
-                                    } else if let Ok(f) = row.try_get::<f64, _>(col_name) {
-                                        serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap_or(serde_json::Number::from(0)))
-                                    } else if let Ok(b) = row.try_get::<bool, _>(col_name) {
-                                        serde_json::Value::Bool(b)
-                                    } else if let Ok(s) = row.try_get::<String, _>(col_name) {
-                                        serde_json::Value::String(s)
-                                    } else {
-                                        serde_json::Value::Null
-                                    }
-                                }
-                                _ => serde_json::Value::Null,
-                            };
-                            map.insert(col_name.to_string(), val);
+                            json.push('"');
+                            json.push_str(col_name);
+                            json.push_str("\":");
+                            if let Ok(i) = row.try_get::<i64, _>(col_name) {
+                                json.push_str(&i.to_string());
+                            } else if let Ok(s) = row.try_get::<String, _>(col_name) {
+                                json.push('"');
+                                json.push_str(&s.replace('\\', "\\\\").replace('"', "\\\""));
+                                json.push('"');
+                            } else if let Ok(f) = row.try_get::<f64, _>(col_name) {
+                                json.push_str(&f.to_string());
+                            } else if let Ok(b) = row.try_get::<bool, _>(col_name) {
+                                json.push_str(if b { "true" } else { "false" });
+                            } else {
+                                json.push_str("null");
+                            }
                         }
-                        records.push(serde_json::Value::Object(map));
+                        json.push('}');
                     }
-                    Ok::<_, PyErr>(serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string()))
+                    json.push(']');
+                    Ok::<_, PyErr>(json)
                 } else if let Some(pg_p) = pg {
                     let rows = sqlx::query(&query).fetch_all(&pg_p).await
                         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
@@ -1870,7 +2010,8 @@ impl PyDatabase {
                     Err(pyo3::exceptions::PyRuntimeError::new_err("No active database pool"))
                 }
             })
-        })?;
+        })
+    })?;
 
         let mut headers = HashMap::new();
         headers.insert("Content-Type".to_string(), "application/json".to_string());
@@ -1880,6 +2021,101 @@ impl PyDatabase {
             headers,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase C: Embedded Rust Power Modules
+// ---------------------------------------------------------------------------
+
+#[pyfunction]
+#[pyo3(signature = (claims, secret, algorithm = None))]
+fn encode_jwt(py: Python<'_>, claims: PyObject, secret: String, algorithm: Option<String>) -> PyResult<String> {
+    let json_str: String = py.import_bound("json")?.call_method1("dumps", (claims,))?.extract()?;
+    let val: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    let alg = match algorithm.as_deref().unwrap_or("HS256") {
+        "HS384" => jsonwebtoken::Algorithm::HS384,
+        "HS512" => jsonwebtoken::Algorithm::HS512,
+        _       => jsonwebtoken::Algorithm::HS256,
+    };
+
+    let header = jsonwebtoken::Header::new(alg);
+    let key = jsonwebtoken::EncodingKey::from_secret(secret.as_bytes());
+
+    jsonwebtoken::encode(&header, &val, &key)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("JWT Encoding Error: {e}")))
+}
+
+#[pyfunction]
+#[pyo3(signature = (token, secret, algorithm = None))]
+fn decode_jwt(py: Python<'_>, token: String, secret: String, algorithm: Option<String>) -> PyResult<PyObject> {
+    let alg = match algorithm.as_deref().unwrap_or("HS256") {
+        "HS384" => jsonwebtoken::Algorithm::HS384,
+        "HS512" => jsonwebtoken::Algorithm::HS512,
+        _       => jsonwebtoken::Algorithm::HS256,
+    };
+
+    let mut validation = jsonwebtoken::Validation::new(alg);
+    validation.required_spec_claims.clear();
+    let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
+
+    let token_data = jsonwebtoken::decode::<serde_json::Value>(&token, &key, &validation)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("JWT Decoding Error: {e}")))?;
+
+    let json_bytes = serde_json::to_vec(&token_data.claims)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    let py_json = py.import_bound("json")?;
+    let py_dict = py_json.call_method1("loads", (PyBytes::new_bound(py, &json_bytes),))?;
+    Ok(py_dict.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (password))]
+fn hash_password(py: Python<'_>, password: String) -> PyResult<String> {
+    use argon2::{
+        password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
+        Argon2,
+    };
+
+    py.allow_threads(move || {
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        argon2
+            .hash_password(password.as_bytes(), &salt)
+            .map(|h| h.to_string())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (password, hash))]
+fn verify_password(py: Python<'_>, password: String, hash: String) -> PyResult<bool> {
+    use argon2::{
+        password_hash::{PasswordHash, PasswordVerifier},
+        Argon2,
+    };
+
+    py.allow_threads(move || {
+        let parsed_hash = match PasswordHash::new(&hash) {
+            Ok(h) => h,
+            Err(_) => return Ok(false),
+        };
+        Ok(Argon2::default().verify_password(password.as_bytes(), &parsed_hash).is_ok())
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (template_str, context))]
+fn render_template(py: Python<'_>, template_str: String, context: PyObject) -> PyResult<String> {
+    let json_str: String = py.import_bound("json")?.call_method1("dumps", (context,))?.extract()?;
+    let val: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    let env = minijinja::Environment::new();
+    env.render_str(&template_str, val)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Template Render Error: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -1896,5 +2132,10 @@ fn _rustapi(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<EventDecorator>()?;
     m.add_class::<PyStreamingResponse>()?;
     m.add_class::<PyDatabase>()?;
+    m.add_function(wrap_pyfunction!(encode_jwt, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_jwt, m)?)?;
+    m.add_function(wrap_pyfunction!(hash_password, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_password, m)?)?;
+    m.add_function(wrap_pyfunction!(render_template, m)?)?;
     Ok(())
 }

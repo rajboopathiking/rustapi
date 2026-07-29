@@ -1,4 +1,16 @@
-from ._rustapi import Engine, PyRequest, UploadFile, WebSocket, StreamingResponse
+from typing import Any, Dict, Optional
+from ._rustapi import (
+    Engine,
+    PyRequest,
+    UploadFile,
+    WebSocket,
+    StreamingResponse,
+    encode_jwt,
+    decode_jwt,
+    hash_password,
+    verify_password,
+    render_template,
+)
 from .exceptions import HTTPException
 from .depends import Depends
 from .router import APIRouter
@@ -14,11 +26,72 @@ try:
 except ImportError:
     pass
 
+
+class HTMLResponse(Response):
+    """HTML response wrapper automatically setting Content-Type: text/html; charset=utf-8."""
+
+    def __new__(
+        cls,
+        content: str = "",
+        status_code: int = 200,
+        headers: Optional[Dict[str, str]] = None,
+    ):
+        h = headers.copy() if headers else {}
+        h.setdefault("Content-Type", "text/html; charset=utf-8")
+        return Response.__new__(cls, content=content, status_code=status_code, headers=h)
+
+
+class JSONResponse(Response):
+    """JSON response wrapper automatically setting Content-Type: application/json."""
+
+    def __new__(
+        cls,
+        content: Any = None,
+        status_code: int = 200,
+        headers: Optional[Dict[str, str]] = None,
+    ):
+        h = headers.copy() if headers else {}
+        h.setdefault("Content-Type", "application/json")
+        return Response.__new__(cls, content=content, status_code=status_code, headers=h)
+
+
+class PlainTextResponse(Response):
+    """Plain text response wrapper automatically setting Content-Type: text/plain; charset=utf-8."""
+
+    def __new__(
+        cls,
+        content: str = "",
+        status_code: int = 200,
+        headers: Optional[Dict[str, str]] = None,
+    ):
+        h = headers.copy() if headers else {}
+        h.setdefault("Content-Type", "text/plain; charset=utf-8")
+        return Response.__new__(cls, content=content, status_code=status_code, headers=h)
+
+
+class RedirectResponse(Response):
+    """HTTP redirect response wrapper setting Location header."""
+
+    def __new__(
+        cls,
+        url: str,
+        status_code: int = 307,
+        headers: Optional[Dict[str, str]] = None,
+    ):
+        h = headers.copy() if headers else {}
+        h["Location"] = url
+        return Response.__new__(cls, content="", status_code=status_code, headers=h)
+
+
 __version__ = "0.1.19"
 __all__ = [
     "Engine",
     "PyRequest",
     "Response",
+    "HTMLResponse",
+    "JSONResponse",
+    "PlainTextResponse",
+    "RedirectResponse",
     "StreamingResponse",
     "HTTPException",
     "Depends",
@@ -27,4 +100,9 @@ __all__ = [
     "UploadFile",
     "WebSocket",
     "Database",
+    "encode_jwt",
+    "decode_jwt",
+    "hash_password",
+    "verify_password",
+    "render_template",
 ]
