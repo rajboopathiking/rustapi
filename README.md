@@ -61,6 +61,12 @@ maturin develop --release
 pytest tests/ -v
 ```
 
+PYPI Package
+
+```bash
+pip install pyrustapi
+```
+
 ---
 
 ## 📄 License
