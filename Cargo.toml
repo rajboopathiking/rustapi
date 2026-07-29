@@ -28,6 +28,9 @@ tungstenite = "0.30.0"
 sha1 = "0.11.0"
 base64 = "0.23.0"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgres", "json"] }
+jsonwebtoken = "9"
+argon2 = "0.5"
+minijinja = { version = "2", features = ["loader", "json"] }
 
 [profile.release]
 lto = true

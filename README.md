@@ -1,89 +1,62 @@
-# RustAPI
+# ⚡ RustAPI
 
-A FastAPI-style Python web framework backed by a Rust (tokio/hyper) engine —
-with a built-in MCP (Model Context Protocol) server on the same instance.
+**FastAPI-style Python Web Framework backed by a Rust (Tokio / Hyper) Engine — with embedded Rust Database Streaming, JWT & Argon2 Primitives, Tier 3 Rust-Native Routes, and a built-in MCP Server.**
 
-```python
-from rustapi import Engine
-from pydantic import BaseModel
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python: 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
+[![Rust: 1.75+](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 
-app = Engine()
+---
 
-class Item(BaseModel):
-    name: str
-    price: float
+### 📦 Key Open-Source Features Included
 
-@app.get("/")
-def root():
-    return {"message": "hello"}
+| Feature Area | Implementation Details |
+| :--- | :--- |
+| **HTTP & Routing** | FastAPI-style `@app.get`, `@app.post`, `APIRouter`, `Depends`, `app.dependency_overrides`, `response_model`, `reload=True`. |
+| **Rust-Native Tier 3 Routes** | `app.add_native_route()` zero-GIL C-speed fast-paths (**50,000+ req/sec**). |
+| **Database Engine** | `sqlx` SQLite & PostgreSQL pool (`app.connect_db()`) with zero-copy JSON streaming (`db.query_json()`). |
+| **Power Primitives** | Native Rust `encode_jwt()` / `decode_jwt()`, Argon2 `hash_password()` / `verify_password()`, MiniJinja `render_template()`. |
+| **Response Classes** | `HTMLResponse`, `JSONResponse`, `PlainTextResponse`, `RedirectResponse`, `StreamingResponse`. |
+| **Request Ergonomics** | `req.json()`, `req.form`, `req.body`, `UploadFile`, `WebSocket`. |
+| **AI / MCP Integration** | Embedded Model Context Protocol server (`@app.tool()`, `@app.resource()`, `@app.prompt()`) at `POST /mcp`. |
+| **Telemetry & Observability** | Terminal access logging (`INFO: 127.0.0.1 - "GET /render HTTP/1.1" 200 - 0.45ms`), Swagger UI (`/docs`), OpenAPI (`/openapi.json`). |
 
-@app.post("/items")
-def create_item(item: Item):
-    return {"created": item.name, "price": item.price}
+---
 
-@app.tool()
-def add(a: int, b: int) -> int:
-    """Add two numbers."""
-    return a + b
+## 📚 Documentation Reference
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
-```
+Detailed documentation is available in the [`docs/`](docs/) directory:
 
-- `GET/POST/PUT/DELETE` routes with path params, query params, and Pydantic
-  request-body validation
-- Auto-generated OpenAPI schema at `/openapi.json`, Swagger UI at `/docs`
-- MCP server at `POST /mcp` (JSON-RPC 2.0, Streamable HTTP transport):
-  `@app.tool()`, `@app.resource(uri)`, `@app.prompt()`
-- Multi-worker mode (`workers=N`, `SO_REUSEPORT`) and `reload=True` for dev
-- Async and sync handlers, dispatched off the request-handling thread so a
-  slow handler doesn't stall other in-flight requests
+- [Getting Started & Core Routing](docs/getting_started.md)
+- [3-Tier Architecture & Benchmarks Guide](docs/3tier_architecture_and_benchmarks.md)
+- [Tier 3 Rust-Native Business Logic Guide](docs/native_business_logic.md)
+- [Rust-Native Database Engine](docs/database_engine.md)
+- [Embedded Rust Power Primitives (JWT, Argon2, MiniJinja)](docs/power_primitives.md)
+- [Model Context Protocol (MCP) Server](docs/mcp_server.md)
+- [Response Types & Request Ergonomics](docs/response_types.md)
+- [Empirical Performance Benchmark Report](performance-reports/fastapi_vs_hybrid_vs_native.md)
 
-## Install
+---
 
-```bash
-pip install rustapi-framework
-```
+## 🛠️ Local Development & Testing
 
-## Development
+Build from source with [maturin](https://github.com/PyO3/maturin):
 
 ```bash
+# Clone the repository
+git clone https://github.com/rajboopathiking/rustapi.git
+cd rustapi
+
+# Build release wheel with Maturin
 pip install maturin
 maturin develop --release
+
+# Run full test suite
 pytest tests/ -v
 ```
 
-## What runs where
+---
 
-Routing, validation dispatch, JSON transport, and the MCP JSON-RPC envelope
-are Rust. Your handler bodies run as ordinary Python (CPython), same as any
-other Python web framework — that part doesn't change unless you write a
-handler as a native `#[pyfunction]` yourself (see `rustapi.compute` for an
-example of that pattern).
+## 📄 License
 
-## Architectural Boundaries & Trade-Offs
-
-To maintain maximum performance, RustAPI strictly adheres to the following constraints:
-
-```
-1).  No ASGI Middleware: RustAPI does not run under Uvicorn/Gunicorn. Core middleware (Auth, CORS, Logging) must run in the Rust layer to preserve speed.
-```
-
-```
-2). The Python GIL Ceiling: RustAPI eliminates framework overhead, but cannot magically speed up poorly written Python code. CPU-heavy Python loops will block a thread. Phase 4 features must be used to bypass the GIL for heavy computing.
-```
-
-   ## 5. Performance Slider
-
-
-   ```
-
-   1.  **Tier 1 (Orchestrator):** Write in **Pure Python** for maximum developer speed.                                                                                                 
-   2.  **Tier 2 (Hybrid):** Use **Rust-Native Modules** for heavy I/O and Serialization (The **default mode** for high performance - **Recommended**).                                                      
-   3.  **Tier 3 (Turbo):** Write custom **Rust Hot-Paths** for extreme computational requirements.          
-
-   ``` 
-
-## License
-
-MIT
+Distributed under the [MIT License](LICENSE).

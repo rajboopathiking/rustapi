@@ -279,6 +279,68 @@ def get_users():
 
 ---
 
+### §6. Embedded Rust Power Primitives (JWT, Argon2, MiniJinja)
+
+RustAPI exposes native, zero-dependency C-speed security and templating primitives directly to Python:
+
+```python
+from rustapi import encode_jwt, decode_jwt, hash_password, verify_password, render_template
+
+# 1. Native Rust JWT Engine (HS256, HS384, HS512)
+token = encode_jwt({"user_id": 42, "role": "admin"}, secret="secret_key")
+claims = decode_jwt(token, secret="secret_key")
+
+# 2. Native Argon2 Password Hashing (releasing GIL on Tokio worker pool)
+pw_hash = hash_password("MySecurePassword123!")
+is_valid = verify_password("MySecurePassword123!", pw_hash)
+
+# 4. Native Template Rendering & Specialized Responses
+rendered = render_template("<h1>Hello {{ name }}!</h1>", {"name": "Boopathi"})
+
+# Dedicated Response Wrappers
+html_resp = HTMLResponse(rendered)            # Content-Type: text/html
+json_resp = JSONResponse({"status": "ok"})     # Content-Type: application/json
+text_resp = PlainTextResponse("Hello")        # Content-Type: text/plain
+redir_resp = RedirectResponse("/docs")        # Status: 307, Location: /docs
+```
+
+#### Request JSON & Form Parsing (`req.json()`, `req.form`)
+
+Handlers can accept incoming requests and access both JSON bodies and form fields easily:
+
+```python
+@app.post("/auth/login")
+def login(req):
+    # Option 1: Parse JSON request body
+    data = req.json()
+    username = data.get("username")
+    
+    # Option 2: Parse Form or Query parameters
+    form = req.form
+    password = form.get("password", "")
+    
+    # Process security & return response
+    h = hash_password(password)
+    token = encode_jwt({"sub": username}, secret="key")
+    return JSONResponse({"token": token, "hash": h})
+```
+
+---
+
+### §7. Real-Time Access Logging & Telemetry
+
+RustAPI automatically outputs structured, high-speed terminal access logs for every incoming HTTP request with zero overhead:
+
+```text
+INFO:     Started server process [80839]
+INFO:     RustAPI server running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:54321 - "GET /docs HTTP/1.1" 200 - 0.85ms
+INFO:     127.0.0.1:54322 - "POST /auth/login HTTP/1.1" 200 - 4.12ms
+INFO:     127.0.0.1:54323 - "GET /invalid HTTP/1.1" 404 - 0.15ms
+```
+
+---
+
 ### §5. Production Ergonomics (APIRouter & Lifespan Hooks)
 
 #### FastAPI
