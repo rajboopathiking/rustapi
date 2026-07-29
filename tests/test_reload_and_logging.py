@@ -53,7 +53,10 @@ if __name__ == "__main__":
 
     finally:
         try:
-            proc.send_signal(signal.SIGINT)
+            if sys.platform == "win32":
+                proc.terminate()
+            else:
+                proc.send_signal(signal.SIGINT)
             stdout, stderr = proc.communicate(timeout=3)
         except Exception:
             proc.kill()
