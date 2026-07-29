@@ -10,6 +10,8 @@ Tested under identical hardware and concurrency settings (**40 concurrent persis
 
 Full Report: [performance-reports/fastapi_vs_rustapi_comparison.md](../performance-reports/fastapi_vs_rustapi_comparison.md)
 
+No optimization - poor python logics(worst performance of rustapi vs fastapi)
+
 | Feature Scenario & Endpoint | FastAPI (Uvicorn / Python Stack) | RustAPI (Release Build / Tokio Core) | RustAPI Performance Advantage |
 | :--- | :--- | :--- | :--- |
 | **Basic JSON API Routing (`/json`)** | 1,819.49 req/sec (21.98ms) | **5,089.18 req/sec (7.86ms)** | ⚡ **2.80x Faster (280%)** |
