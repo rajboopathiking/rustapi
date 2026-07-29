@@ -83,7 +83,7 @@ class RedirectResponse(Response):
         return Response.__new__(cls, content="", status_code=status_code, headers=h)
 
 
-__version__ = "0.1.19"
+__version__ = "0.1.30"
 __all__ = [
     "Engine",
     "PyRequest",
