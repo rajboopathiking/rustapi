@@ -62,6 +62,9 @@ jobs:
 
       - name: Build Wheels
         uses: PyO3/maturin-action@v1
+        env:
+          CFLAGS_aarch64_unknown_linux_gnu: "-march=armv8-a"
+          CFLAGS_aarch64_unknown_linux_musl: "-march=armv8-a"
         with:
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux || '' }}
