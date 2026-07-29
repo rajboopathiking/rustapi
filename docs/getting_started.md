@@ -1,6 +1,6 @@
 # 🚀 Getting Started with RustAPI
 
-RustAPI provides a FastAPI-compatible surface backed by a high-performance Tokio / Hyper core in Rust.
+RustAPI provides a FastAPI-compatible surface backed by a high-performance Tokio / Hyper core in Rust with embedded database streaming, security primitives, and Tier 3 native fast-paths.
 
 ---
 
@@ -20,6 +20,37 @@ def sync_root():
 @app.get("/async")
 async def async_root():
     return {"message": "Async handler routed by Rust"}
+```
+
+---
+
+## ⚡ Tier 3 Rust-Native Fast-Path Routes (`app.add_native_route`)
+
+For extreme performance hot paths (50,000+ req/sec), register pre-compiled Rust endpoints that completely bypass the CPython bytecode interpreter and GIL:
+
+```python
+# 1. Native JSON Fast-Path
+app.add_native_route("/fast-json", '{"status": "ok", "tier": 3}', content_type="application/json")
+
+# 2. Native HTML Fast-Path
+app.add_native_route("/health", '<h1>System Operational</h1>', content_type="text/html")
+```
+
+---
+
+## 🗄️ Rust-Native Database Engine
+
+Query databases with zero-copy JSON streaming directly to the client socket:
+
+```python
+db = app.connect_db("sqlite::memory:")
+db.execute("CREATE TABLE items (id INT, name TEXT)")
+db.execute("INSERT INTO items VALUES (1, 'Laptop')")
+
+@app.get("/db-items")
+def db_items():
+    # Direct zero-copy JSON stream from Rust to HTTP response
+    return db.query_json("SELECT * FROM items")
 ```
 
 ---
