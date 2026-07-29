@@ -30,8 +30,6 @@
 ## 📚 Documentation Reference
 
 Detailed documentation is available in the [`docs/`](docs/) directory and project reference:
-
-- [🚀 Engineering Roadmap](ROADMAP.md)
 - [📖 Getting Started & Core Routing](docs/getting_started.md)
 - [📚 Complete API & Migration Guide](docs/docs.md)
 - [🏛️ 3-Tier Architecture Guide](docs/3tier_architecture_and_benchmarks.md)
