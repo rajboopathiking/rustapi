@@ -831,7 +831,7 @@ def _schema_from_signature(func):
                 eprintln!("INFO:     Will watch for file changes in '.'");
             }
 
-            let exit_result: Result<(), PyErr> = py.allow_threads(move || {
+            let exit_result: bool = py.allow_threads(move || {
                 struct ChildGuard(Vec<std::process::Child>);
                 impl Drop for ChildGuard {
                     fn drop(&mut self) {
@@ -858,7 +858,7 @@ def _schema_from_signature(func):
                     None
                 };
 
-                loop {
+                let interrupted = loop {
                     if reload {
                         if let Ok(Ok(event)) = rx.recv_timeout(Duration::from_millis(250)) {
                             if event.paths.iter().any(|p| p.extension().map_or(false, |e| e == "py")) {
@@ -873,18 +873,19 @@ def _schema_from_signature(func):
                     } else {
                         thread::sleep(Duration::from_millis(250));
                     }
-                    if let Err(e) = Python::with_gil(|py| py.check_signals()) {
-                        return Err(e);
+                    if Python::with_gil(|py| py.check_signals().is_err()) {
+                        break true;
                     }
-                }
+                };
+                interrupted
             });
 
-            return match exit_result {
-                Err(err) => Python::with_gil(|py| {
-                    if err.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) { Ok(()) } else { Err(err) }
-                }),
-                Ok(()) => Ok(()),
-            };
+            if exit_result {
+                if let Err(err) = py.check_signals() {
+                    if err.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) { return Ok(()); } else { return Err(err); }
+                }
+            }
+            return Ok(());
         }
 
         // Worker mode: start the Tokio HTTP server.
