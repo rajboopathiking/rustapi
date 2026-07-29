@@ -25,9 +25,10 @@ jobs:
       - name: Install dependencies
         run: pip install maturin pytest requests pydantic
       - name: Build wheel and install
+        shell: bash
         run: |
           maturin build --out dist
-          pip install dist/*.whl
+          pip install --find-links=dist pyrustapi
       - name: Run tests
         run: pytest tests/ -v
 
