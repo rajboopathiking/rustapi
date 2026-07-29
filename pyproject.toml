@@ -50,5 +50,6 @@ Issues = "https://github.com/rajboopathiking/rustapi/issues"
 
 [tool.maturin]
 python-source = "python"
+python-packages = ["rustapi", "pyrustapi"]
 module-name = "rustapi._rustapi"
 features = ["pyo3/extension-module"]
