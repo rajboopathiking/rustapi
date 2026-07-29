@@ -19,6 +19,11 @@ class UserOut(BaseModel):
     username: str
     email: str
 
+class UserIn(BaseModel):
+    username: str
+    password: str
+    email: str
+
 
 # ---- 3. Route Handlers ----
 @app.get("/")
@@ -35,6 +40,11 @@ def hello():
 def get_user_by_id(request):
     return {"user_id": request.path_params["user_id"], "requested_via": request.path}
 
+
+@app.post("/create_user")
+async def create_user(user: UserIn):
+        # Here you would typically insert the user into the database
+    return {"message": f"User {user.username} created successfully!"}
 
 @app.get("/search")
 def search(request):
