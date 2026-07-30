@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RustAPI — Rust-Native Database Engine & Zero-Copy SQL Stream</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0d10;
+    --surface-1: #13171f;
+    --surface-2: #1c222d;
+    --surface-3: #252d3c;
+    --border: #2e384a;
+    --border-light: #3a475d;
+    --text: #f0f4f8;
+    --text-muted: #94a3b8;
+    --text-dim: #64748b;
+    --rust: #f95738;
+    --rust-hover: #e04324;
+    --rust-dim: rgba(249, 87, 56, 0.15);
+    --python: #38bdf8;
+    --success: #10b981;
+    --radius: 8px;
+    --radius-lg: 12px;
+    --font-display: 'Space Grotesk', sans-serif;
+    --font-body: 'Inter', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--font-body); font-size: 15px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--rust); text-decoration: none; transition: color 0.15s; }
+  a:hover { color: var(--rust-hover); text-decoration: underline; }
+  code, pre { font-family: var(--font-mono); }
+  ::selection { background: var(--rust); color: #fff; }
+
+  /* Navigation Bar */
+  .navbar {
+    position: sticky; top: 0; z-index: 100; background: rgba(11, 13, 16, 0.95);
+    backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    padding: 14px 28px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .nav-brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-weight: 700; font-size: 1.25rem; }
+  .nav-brand img { height: 38px; width: auto; border-radius: 6px; }
+  .nav-links { display: flex; gap: 20px; align-items: center; }
+  .nav-links a {
+    color: var(--text-muted); font-size: 0.9rem; font-weight: 500; padding: 6px 12px;
+    border-radius: var(--radius); transition: all 0.15s ease;
+  }
+  .nav-links a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
+  .nav-links a.active { color: var(--rust); background: var(--rust-dim); font-weight: 600; }
+
+  /* Shell Layout */
+  .shell { display: flex; max-width: 1400px; margin: 0 auto; min-height: calc(100vh - 67px); }
+  .sidebar {
+    width: 260px; flex-shrink: 0; position: sticky; top: 67px; align-self: flex-start;
+    height: calc(100vh - 67px); overflow-y: auto; padding: 28px 20px; border-right: 1px solid var(--border);
+    background: rgba(11, 13, 16, 0.5);
+  }
+  .sidebar nav { display: flex; flex-direction: column; gap: 4px; }
+  .sidebar nav a {
+    color: var(--text-muted); font-size: 0.88rem; padding: 8px 12px; border-radius: var(--radius);
+    transition: all 0.15s ease; font-weight: 500;
+  }
+  .sidebar nav a:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
+  .sidebar nav a.active { background: var(--rust-dim); color: var(--rust); font-weight: 600; }
+  .sidebar-category {
+    font-family: var(--font-mono); font-size: 0.68rem; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--text-dim); margin: 16px 0 6px 12px;
+  }
+
+  .content { flex: 1; min-width: 0; padding: 0 56px 120px; }
+  .content section { padding-top: 56px; border-bottom: 1px solid var(--border); padding-bottom: 48px; }
+  .content section:last-of-type { border-bottom: none; }
+
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--rust); background: var(--rust-dim); padding: 4px 14px; border-radius: 20px;
+    display: inline-block; margin-bottom: 20px; border: 1px solid rgba(249, 87, 56, 0.3);
+  }
+
+  pre {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-lg);
+    padding: 20px 24px; overflow-x: auto; font-size: 0.88rem; line-height: 1.6; color: #e2e8f0;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);
+  }
+  code:not(pre code) { background: var(--surface-2); padding: 2px 7px; border-radius: 4px; font-size: 0.85em; color: var(--rust); border: 1px solid var(--border); }
+  .kw { color: #f472b6; font-weight: 600; }
+  .dec { color: var(--rust); font-weight: 600; }
+  .str { color: #a3e635; }
+  .com { color: var(--text-dim); font-style: italic; }
+  .num { color: #fbbf24; }
+
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 24px; margin: 16px 0; }
+  .card h3 { font-family: var(--font-display); font-size: 1.15rem; margin: 0 0 8px; font-weight: 600; color: #fff; }
+
+  footer { margin-top: 80px; padding: 40px 0; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.85rem; text-align: center; }
+
+  @media (max-width: 900px) {
+    .shell { display: block; }
+    .sidebar { position: relative; width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); top: 0; }
+    .content { padding: 0 20px 80px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="navbar">
+  <div class="nav-brand">
+    <img src="pyrustapi-logo%20(1).png" alt="RustAPI Logo" />
+    <span>RustAPI ⚡</span>
+  </div>
+  <nav class="nav-links">
+    <a href="index.html">Home</a>
+    <a href="getting-started.html">Getting Started</a>
+    <a href="benchmarks.html">Benchmarks Report</a>
+    <a href="database.html" class="active">Database Engine</a>
+    <a href="security-power-modules.html">Security Modules</a>
+    <a href="mcp-server.html">MCP AI Protocol</a>
+    <a href="api-reference.html">API Reference</a>
+  </nav>
+</header>
+
+<div class="shell">
+  <aside class="sidebar">
+    <nav>
+      <div class="sidebar-category">Database Engine</div>
+      <a href="#connect" class="active">Connecting Pools</a>
+      <a href="#query-json">Zero-Copy query_json()</a>
+      <a href="#execute">Executing Mutations</a>
+      <a href="#wal-mode">SQLite WAL &amp; Postgres</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+
+    <section id="connect">
+      <span class="eyebrow">Embedded SQL Connection Pooling</span>
+      <h1 style="font-family: var(--font-display); font-size: 2.6rem; margin-top: 10px;">🗄️ Rust-Native Database Engine</h1>
+      <p style="color: var(--text-muted); font-size: 1.1rem;">
+        RustAPI embeds high-concurrency <code>sqlx</code> connection pooling directly inside the engine for PostgreSQL and SQLite.
+      </p>
+
+      <pre><code><span class="kw">import</span> rustapi
+
+app = rustapi.Engine()
+
+<span class="com"># SQLite Connection Pool</span>
+db = app.connect_db(<span class="str">"sqlite://data.db"</span>)
+
+<span class="com"># PostgreSQL Connection Pool</span>
+<span class="com"># db = app.connect_db("postgres://user:pass@localhost/dbname")</span></code></pre>
+    </section>
+
+    <section id="query-json">
+      <span class="eyebrow">Zero-Copy Performance</span>
+      <h2>⚡ Zero-Copy JSON Streaming (<code>db.query_json()</code>)</h2>
+      
+      <div class="card">
+        <h3>Why query_json() is up to 30x Faster</h3>
+        <p>In standard FastAPI, SQL rows are mapped into Python tuples, instantiated into Python dicts, validated by Pydantic models, and converted to strings via json.dumps. This creates thousands of CPython heap allocations and holds the GIL.</p>
+        <p>In RustAPI, <code>db.query_json()</code> reads raw bytes from <code>sqlx</code>, formats UTF-8 JSON buffers natively in Rust memory, and streams bytes directly into Hyper TCP sockets <strong>without ever instantiating Python objects or holding the GIL</strong>.</p>
+      </div>
+
+      <pre><code><span class="dec">@app.get</span>(<span class="str">"/products"</span>)
+<span class="kw">def</span> get_products():
+    <span class="kw">return</span> db.query_json(<span class="str">"SELECT id, name, price, stock FROM products WHERE active = 1"</span>)</code></pre>
+    </section>
+
+    <section id="execute">
+      <span class="eyebrow">Fast Mutations</span>
+      <h2>✏️ Executing SQL Mutations (<code>db.execute()</code>)</h2>
+      <p>Execute <code>INSERT</code>, <code>UPDATE</code>, and <code>DELETE</code> queries with automatic thread handle reuse:</p>
+
+      <pre><code><span class="dec">@app.post</span>(<span class="str">"/products"</span>)
+<span class="kw">def</span> create_product(name: str, price: float):
+    rows_affected = db.execute(f<span class="str">"INSERT INTO products (name, price) VALUES ('{name}', {price})"</span>)
+    <span class="kw">return</span> {<span class="str">"status"</span>: <span class="str">"created"</span>, <span class="str">"affected"</span>: rows_affected}</code></pre>
+    </section>
+
+    <footer>
+      <p>RustAPI v0.1.31 — Built with Tokio, Hyper, PyO3, and sqlx. MIT Licensed.</p>
+    </footer>
+
+  </main>
+</div>
+
+</body>
+</html>

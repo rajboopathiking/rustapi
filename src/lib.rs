@@ -416,6 +416,37 @@ impl PyUploadFile {
     }
 }
 
+fn serde_to_pyobject(py: Python<'_>, val: &serde_json::Value) -> PyResult<PyObject> {
+    match val {
+        serde_json::Value::Null => Ok(py.None()),
+        serde_json::Value::Bool(b) => Ok(b.to_object(py)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(i.to_object(py))
+            } else if let Some(f) = n.as_f64() {
+                Ok(f.to_object(py))
+            } else {
+                Ok(py.None())
+            }
+        }
+        serde_json::Value::String(s) => Ok(s.to_object(py)),
+        serde_json::Value::Array(arr) => {
+            let py_list = pyo3::types::PyList::empty_bound(py);
+            for v in arr {
+                py_list.append(serde_to_pyobject(py, v)?)?;
+            }
+            Ok(py_list.into_any().unbind())
+        }
+        serde_json::Value::Object(map) => {
+            let py_dict = pyo3::types::PyDict::new_bound(py);
+            for (k, v) in map {
+                py_dict.set_item(k, serde_to_pyobject(py, v)?)?;
+            }
+            Ok(py_dict.into_any().unbind())
+        }
+    }
+}
+
 #[pyclass]
 struct PyRequest {
     #[pyo3(get)] method: String,
@@ -455,6 +486,9 @@ impl PyRequest {
         if trimmed.is_empty() {
             let dict = pyo3::types::PyDict::new_bound(py);
             return Ok(dict.unbind().into());
+        }
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&self.body) {
+            return serde_to_pyobject(py, &val);
         }
         let py_json = py.import_bound("json")?;
         py_json.call_method1("loads", (&self.body,)).map(|b| b.unbind())
@@ -838,15 +872,26 @@ def _schema_from_signature(func):
             };
             get_db_rt().block_on(async move {
                 if conn_str.starts_with("sqlite") {
-                    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-                        .max_connections(20)
-                        .connect(&conn_str)
+                    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous, SqlitePoolOptions};
+                    use std::str::FromStr;
+                    use std::time::Duration;
+
+                    let opts = SqliteConnectOptions::from_str(&conn_str)
+                        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+                        .journal_mode(SqliteJournalMode::Wal)
+                        .synchronous(SqliteSynchronous::Normal)
+                        .busy_timeout(Duration::from_secs(10))
+                        .create_if_missing(true);
+
+                    let pool = SqlitePoolOptions::new()
+                        .max_connections(50)
+                        .connect_with(opts)
                         .await
                         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
                     Ok::<_, PyErr>((Some(pool), None))
                 } else if conn_str.starts_with("postgres") {
                     let pool = sqlx::postgres::PgPoolOptions::new()
-                        .max_connections(20)
+                        .max_connections(50)
                         .connect(&conn_str)
                         .await
                         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
@@ -1657,8 +1702,10 @@ async fn handle_route(
     let form_c              = form_map.clone();
     let files_c             = files_map.clone();
 
+    let permit = sem_c.acquire_owned().await.ok();
+
     let exec_res: PyResult<PyObject> = tokio::task::spawn_blocking(move || {
-        let _permit = sem_c.try_acquire().ok();
+        let _permit = permit;
         Python::with_gil(|py| -> PyResult<PyObject> {
             let kwargs = pyo3::types::PyDict::new_bound(py);
 
@@ -1715,6 +1762,8 @@ async fn handle_route(
             if let Some(ref model) = pydantic_model {
                 let py_dict = if body_c.is_empty() {
                     pyo3::types::PyDict::new_bound(py).into_any()
+                } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body_c) {
+                    serde_to_pyobject(py, &val)?.into_bound(py)
                 } else {
                     py.import_bound("json")?.call_method1("loads", (&body_c,))?.into_any()
                 };
@@ -2069,9 +2118,10 @@ impl PyDatabase {
     fn execute(&self, py: Python<'_>, query: String) -> PyResult<u64> {
         let pool = self.sqlite_pool.clone();
         let pg = self.pg_pool.clone();
+        let handle = tokio::runtime::Handle::try_current().ok();
 
         py.allow_threads(move || {
-            get_db_rt().block_on(async move {
+            let fut = async move {
                 if let Some(sqlite) = pool {
                     let res = sqlx::query(&query).execute(&sqlite).await
                         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
@@ -2083,7 +2133,12 @@ impl PyDatabase {
                 } else {
                     Err(pyo3::exceptions::PyRuntimeError::new_err("No active database pool"))
                 }
-            })
+            };
+            if let Some(h) = handle {
+                h.block_on(fut)
+            } else {
+                get_db_rt().block_on(fut)
+            }
         })
     }
 
@@ -2093,10 +2148,10 @@ impl PyDatabase {
 
         let pool = self.sqlite_pool.clone();
         let pg = self.pg_pool.clone();
+        let handle = tokio::runtime::Handle::try_current().ok();
 
         let json_str: String = py.allow_threads(move || {
-            tokio::task::block_in_place(|| {
-                get_db_rt().block_on(async move {
+            let fut = async move {
                 if let Some(sqlite) = pool {
                     let rows = sqlx::query(&query).fetch_all(&sqlite).await
                         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
@@ -2161,9 +2216,13 @@ impl PyDatabase {
                 } else {
                     Err(pyo3::exceptions::PyRuntimeError::new_err("No active database pool"))
                 }
-            })
-        })
-    })?;
+            };
+            if let Some(h) = handle {
+                h.block_on(fut)
+            } else {
+                get_db_rt().block_on(fut)
+            }
+        })?;
 
         let mut headers = HashMap::new();
         headers.insert("Content-Type".to_string(), "application/json".to_string());
