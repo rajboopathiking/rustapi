@@ -50,15 +50,16 @@
     backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
     padding: 14px 28px; display: flex; align-items: center; justify-content: space-between;
   }
-  .nav-brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-weight: 700; font-size: 1.25rem; }
+  .nav-brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-weight: 700; font-size: 1.25rem; cursor: pointer; }
   .nav-brand img { height: 38px; width: auto; border-radius: 6px; }
-  .nav-links { display: flex; gap: 20px; align-items: center; }
-  .nav-links a {
-    color: var(--text-muted); font-size: 0.9rem; font-weight: 500; padding: 6px 12px;
-    border-radius: var(--radius); transition: all 0.15s ease;
+  .nav-links { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .nav-tab {
+    color: var(--text-muted); font-size: 0.88rem; font-weight: 500; padding: 7px 14px;
+    border-radius: var(--radius); transition: all 0.15s ease; cursor: pointer; background: transparent; border: none;
+    font-family: var(--font-body);
   }
-  .nav-links a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
-  .nav-links a.active { color: var(--rust); background: var(--rust-dim); font-weight: 600; }
+  .nav-tab:hover { color: var(--text); background: var(--surface-2); }
+  .nav-tab.active { color: var(--rust); background: var(--rust-dim); font-weight: 600; border: 1px solid rgba(249,87,56,0.3); }
 
   /* Shell Layout */
   .shell { display: flex; max-width: 1400px; margin: 0 auto; min-height: calc(100vh - 67px); }
@@ -68,23 +69,27 @@
     background: rgba(11, 13, 16, 0.5);
   }
   .sidebar nav { display: flex; flex-direction: column; gap: 4px; }
-  .sidebar nav a {
+  .sidebar-tab {
     color: var(--text-muted); font-size: 0.88rem; padding: 8px 12px; border-radius: var(--radius);
-    transition: all 0.15s ease; font-weight: 500;
+    transition: all 0.15s ease; font-weight: 500; cursor: pointer; text-align: left; background: transparent; border: none;
+    display: block; width: 100%; font-family: var(--font-body);
   }
-  .sidebar nav a:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
-  .sidebar nav a.active { background: var(--rust-dim); color: var(--rust); font-weight: 600; }
+  .sidebar-tab:hover { background: var(--surface-2); color: var(--text); }
+  .sidebar-tab.active { background: var(--rust-dim); color: var(--rust); font-weight: 600; }
   .sidebar-category {
     font-family: var(--font-mono); font-size: 0.68rem; text-transform: uppercase;
     letter-spacing: 0.08em; color: var(--text-dim); margin: 16px 0 6px 12px;
   }
 
-  .content { flex: 1; min-width: 0; padding: 0 56px 120px; }
-  .content section { padding-top: 56px; border-bottom: 1px solid var(--border); padding-bottom: 48px; }
-  .content section:last-of-type { border-bottom: none; }
+  .content { flex: 1; min-width: 0; padding: 40px 56px 120px; }
+  
+  /* SPA Tab View Container */
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; animation: fadeIn 0.2s ease-in-out; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
   /* Hero */
-  .hero { padding: 60px 0 32px; max-width: 900px; }
+  .hero { padding: 40px 0 32px; max-width: 900px; }
   .hero-logo { height: 90px; width: auto; margin-bottom: 24px; border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid var(--border-light); }
   .eyebrow {
     font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase;
@@ -114,7 +119,7 @@
   .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 20px; margin: 24px 0; }
   .card {
     background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-lg);
-    padding: 24px; transition: border-color 0.2s, transform 0.2s; text-decoration: none; color: inherit; display: block;
+    padding: 24px; transition: border-color 0.2s, transform 0.2s; text-decoration: none; color: inherit; display: block; cursor: pointer;
   }
   .card:hover { border-color: var(--rust); transform: translateY(-3px); }
   .card-icon { font-size: 2rem; margin-bottom: 12px; }
@@ -138,7 +143,7 @@
   pre {
     background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-lg);
     padding: 20px 24px; overflow-x: auto; font-size: 0.88rem; line-height: 1.6; color: #e2e8f0;
-    box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.2); margin: 16px 0;
   }
   code:not(pre code) { background: var(--surface-2); padding: 2px 7px; border-radius: 4px; font-size: 0.85em; color: var(--rust); border: 1px solid var(--border); }
   .kw { color: #f472b6; font-weight: 600; }
@@ -147,171 +152,460 @@
   .com { color: var(--text-dim); font-style: italic; }
   .num { color: #fbbf24; }
 
+  /* Tables */
+  .table-wrapper { overflow-x: auto; margin: 20px 0; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface-1); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; text-align: left; }
+  th {
+    font-family: var(--font-mono); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-muted); padding: 12px 16px; background: var(--surface-2); border-bottom: 1px solid var(--border);
+  }
+  td { padding: 14px 16px; border-bottom: 1px solid var(--border); color: var(--text); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+
+  .badge { font-family: var(--font-mono); font-size: 0.72rem; padding: 3px 8px; border-radius: 12px; font-weight: 600; display: inline-block; }
+  .badge-rust { background: var(--rust-dim); color: var(--rust); border: 1px solid rgba(249,87,56,0.3); }
+  .badge-success { background: var(--success-dim); color: var(--success); border: 1px solid rgba(16,185,129,0.3); }
+
+  /* Visual Performance Bar Chart */
+  .chart-bar-container { margin: 14px 0; }
+  .chart-bar-label { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 0.82rem; margin-bottom: 4px; }
+  .chart-bar-track { height: 14px; background: var(--surface-2); border-radius: 7px; overflow: hidden; position: relative; }
+  .chart-bar-fill { height: 100%; border-radius: 7px; transition: width 0.6s cubic-bezier(0.16, 1, 0.3, 1); }
+  .chart-bar-fill.rustapi { background: linear-gradient(90deg, var(--rust) 0%, #ff8c42 100%); }
+  .chart-bar-fill.fastapi { background: linear-gradient(90deg, var(--python) 0%, #38bdf8 100%); }
+
   footer { margin-top: 80px; padding: 40px 0; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.85rem; text-align: center; }
 
   @media (max-width: 900px) {
     .shell { display: block; }
     .sidebar { position: relative; width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); top: 0; }
-    .content { padding: 0 20px 80px; }
+    .content { padding: 20px 20px 80px; }
   }
 </style>
 </head>
 <body>
 
-<!-- Header Navigation Bar -->
+<!-- Single-Page Application (SPA) Header Navigation -->
 <header class="navbar">
-  <div class="nav-brand">
+  <div class="nav-brand" onclick="switchTab('overview')">
     <img src="pyrustapi-logo%20(1).png" alt="RustAPI Logo" />
     <span>RustAPI ⚡</span>
   </div>
   <nav class="nav-links">
-    <a href="index.html" class="active">Home</a>
-    <a href="getting-started.html">Getting Started</a>
-    <a href="benchmarks.html">Benchmarks Report</a>
-    <a href="database.html">Database Engine</a>
-    <a href="security-power-modules.html">Security Modules</a>
-    <a href="mcp-server.html">MCP AI Protocol</a>
-    <a href="api-reference.html">API Reference</a>
+    <button class="nav-tab active" data-tab="overview" onclick="switchTab('overview')">Home</button>
+    <button class="nav-tab" data-tab="getting-started" onclick="switchTab('getting-started')">Getting Started</button>
+    <button class="nav-tab" data-tab="benchmarks" onclick="switchTab('benchmarks')">Benchmarks Report</button>
+    <button class="nav-tab" data-tab="database" onclick="switchTab('database')">Database Engine</button>
+    <button class="nav-tab" data-tab="security" onclick="switchTab('security')">Security Modules</button>
+    <button class="nav-tab" data-tab="mcp" onclick="switchTab('mcp')">MCP AI Protocol</button>
+    <button class="nav-tab" data-tab="api-reference" onclick="switchTab('api-reference')">API Reference</button>
   </nav>
 </header>
 
 <div class="shell">
-  <!-- Sidebar -->
+  <!-- Sidebar Navigation -->
   <aside class="sidebar">
     <nav>
-      <div class="sidebar-category">Documentation Hub</div>
-      <a href="index.html" class="active">Overview &amp; Architecture</a>
-      <a href="getting-started.html">Getting Started Guide</a>
-      <a href="benchmarks.html">CRUD Performance Report</a>
-      <a href="database.html">Rust SQL Engine</a>
-      <a href="security-power-modules.html">Rust Power Modules</a>
-      <a href="mcp-server.html">MCP Server Protocol</a>
-      <a href="api-reference.html">Full API Reference</a>
+      <div class="sidebar-category">SPA Portal</div>
+      <button class="sidebar-tab active" data-tab="overview" onclick="switchTab('overview')">Overview &amp; Architecture</button>
+      <button class="sidebar-tab" data-tab="getting-started" onclick="switchTab('getting-started')">Getting Started Guide</button>
+      <button class="sidebar-tab" data-tab="benchmarks" onclick="switchTab('benchmarks')">CRUD Benchmarks Report</button>
+      <button class="sidebar-tab" data-tab="database" onclick="switchTab('database')">Rust Database Engine</button>
+      <button class="sidebar-tab" data-tab="security" onclick="switchTab('security')">Security &amp; Power Primitives</button>
+      <button class="sidebar-tab" data-tab="mcp" onclick="switchTab('mcp')">MCP AI Protocol Server</button>
+      <button class="sidebar-tab" data-tab="api-reference" onclick="switchTab('api-reference')">Full API Reference</button>
     </nav>
   </aside>
 
-  <!-- Main Content -->
+  <!-- Main Content SPA Area -->
   <main class="content">
 
-    <!-- Hero Section -->
-    <section id="overview">
+    <!-- ================= TAB 1: OVERVIEW ================= -->
+    <div id="overview" class="tab-pane active">
       <div class="hero">
         <img src="pyrustapi-logo%20(1).png" alt="pyrustapi logo" class="hero-logo" />
         <br>
         <span class="eyebrow">FastAPI Syntax · Native Tokio/Hyper Core</span>
         <h1 class="hero-title">High-Speed Python Web Framework powered by <em>Native Rust</em></h1>
         <p class="hero-sub">
-          RustAPI gives you 100% FastAPI-compatible Python ergonomics while executing requests on a compiled Rust Tokio/Hyper runtime. Enjoy zero-copy SQL JSON streaming, embedded JWT security, Argon2 password hashing, and >47,000 req/sec machine code routes.
+          RustAPI combines FastAPI's intuitive syntax with a high-concurrency Rust Tokio/Hyper runtime. Write Python handlers while offloading zero-copy SQL streaming, JWT encoding, Argon2 hashing, and hot-path routes directly to compiled C/Rust speed.
         </p>
         <div class="hero-cta">
-          <a href="getting-started.html" class="btn btn-primary">🚀 Get Started in 2 Minutes</a>
-          <a href="benchmarks.html" class="btn btn-secondary">📊 View Verified Performance Report</a>
+          <button onclick="switchTab('getting-started')" class="btn btn-primary">🚀 Get Started in 2 Minutes</button>
+          <button onclick="switchTab('benchmarks')" class="btn btn-secondary">📊 View Verified Performance Report</button>
         </div>
       </div>
 
-      <!-- Feature Grid Hub Cards -->
+      <!-- Feature Grid Cards -->
       <div class="grid-3">
-        <a href="benchmarks.html" class="card">
+        <div onclick="switchTab('benchmarks')" class="card">
           <div class="card-icon">📊</div>
           <h3>CRUD Performance Report</h3>
           <p>RustAPI outperforms FastAPI across ALL CRUD endpoints (up to 12.16x faster on DELETE, 9.29x on PUT, 5.98x on POST).</p>
-        </a>
-        <a href="database.html" class="card">
+        </div>
+        <div onclick="switchTab('database')" class="card">
           <div class="card-icon">🗄️</div>
           <h3>Zero-Copy SQL Stream</h3>
           <p>Stream UTF-8 JSON query results direct from <code>sqlx</code> to socket without creating Python dict objects or holding GIL.</p>
-        </a>
-        <a href="security-power-modules.html" class="card">
+        </div>
+        <div onclick="switchTab('security')" class="card">
           <div class="card-icon">🔐</div>
           <h3>Embedded Rust Primitives</h3>
           <p>Native JWT encoding/decoding, Argon2 password hashing, and MiniJinja rendering running in compiled C/Rust memory.</p>
-        </a>
-        <a href="mcp-server.html" class="card">
+        </div>
+        <div onclick="switchTab('mcp')" class="card">
           <div class="card-icon">🤖</div>
           <h3>AI Agent MCP Server</h3>
           <p>Expose tools, resources, and prompts to Claude &amp; AI agents via Model Context Protocol (JSON-RPC over Streamable HTTP).</p>
-        </a>
-        <a href="getting-started.html" class="card">
+        </div>
+        <div onclick="switchTab('getting-started')" class="card">
           <div class="card-icon">🚀</div>
           <h3>3-Tier Architecture</h3>
           <p>Write Tier 1 Python handlers, Tier 2 hybrid primitives, or Tier 3 pure Rust fast-paths (>47,000 req/s) seamlessly.</p>
-        </a>
-        <a href="api-reference.html" class="card">
+        </div>
+        <div onclick="switchTab('api-reference')" class="card">
           <div class="card-icon">📖</div>
           <h3>Complete API Reference</h3>
           <p>Detailed documentation for <code>Engine</code>, <code>Request</code>, <code>Response</code>, Pydantic coercion, and <code>dependency_overrides</code>.</p>
-        </a>
+        </div>
       </div>
-    </section>
 
-    <!-- Key Metrics Highlight -->
-    <section>
-      <span class="eyebrow">Empirical Verification</span>
-      <h2>⚡ Verified Benchmark Snapshot</h2>
-      <p>Target: 1,000 pre-seeded rows in SQLite under 40 persistent concurrent client connections.</p>
+      <!-- Key Metrics Snapshot -->
+      <div style="margin-top: 40px;">
+        <span class="eyebrow">Empirical Verification</span>
+        <h2>⚡ Verified Benchmark Snapshot</h2>
+        <p>Target: 1,000 pre-seeded rows in SQLite under persistent concurrent connections.</p>
+
+        <div class="grid-3">
+          <div class="metric-card success">
+            <div class="metric-label">Write Operation Speedup (DELETE)</div>
+            <div class="metric-value" style="color: var(--success);">12.16x</div>
+            <div class="metric-label">4,422.77 req/s (6.7ms)</div>
+            <div class="metric-badge">🚀 Outperforms FastAPI</div>
+          </div>
+          <div class="metric-card success">
+            <div class="metric-label">PUT Update Speedup</div>
+            <div class="metric-value" style="color: var(--success);">9.29x</div>
+            <div class="metric-label">2,944.72 req/s (10.1ms)</div>
+            <div class="metric-badge">🚀 Outperforms FastAPI</div>
+          </div>
+          <div class="metric-card success">
+            <div class="metric-label">POST Create Record Speedup</div>
+            <div class="metric-value" style="color: var(--success);">5.98x</div>
+            <div class="metric-label">1,753.78 req/s (17.1ms)</div>
+            <div class="metric-badge">🚀 Outperforms FastAPI</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= TAB 2: GETTING STARTED ================= -->
+    <div id="getting-started" class="tab-pane">
+      <span class="eyebrow">Quick Setup</span>
+      <h1 style="font-family: var(--font-display); font-size: 2.5rem; margin-top: 10px;">🚀 Getting Started &amp; Installation</h1>
+      <p style="color: var(--text-muted); font-size: 1.1rem;">
+        RustAPI is published as a pre-compiled wheel package on PyPI (`pyrustapi`) with zero Rust toolchain required for end users.
+      </p>
+
+      <h3>Installing via Pip</h3>
+      <pre><code>pip install pyrustapi pydantic</code></pre>
+
+      <h3>Writing Your First Application (<code>main.py</code>)</h3>
+      <pre><code><span class="kw">import</span> rustapi
+<span class="kw">from</span> pydantic <span class="kw">import</span> BaseModel
+
+<span class="com"># Initialize RustAPI Engine (Tokio runtime + Hyper HTTP server)</span>
+app = rustapi.Engine()
+
+<span class="kw">class</span> Item(BaseModel):
+    name: str
+    price: float
+
+<span class="dec">@app.get</span>(<span class="str">"/"</span>)
+<span class="kw">def</span> read_root():
+    <span class="kw">return</span> {<span class="str">"Hello"</span>: <span class="str">"World from RustAPI"</span>}
+
+<span class="dec">@app.get</span>(<span class="str">"/items/{item_id}"</span>)
+<span class="kw">def</span> read_item(item_id: int, q: str = None):
+    <span class="kw">return</span> {<span class="str">"item_id"</span>: item_id, <span class="str">"q"</span>: q}
+
+<span class="dec">@app.post</span>(<span class="str">"/items"</span>)
+<span class="kw">def</span> create_item(item: Item):
+    <span class="kw">return</span> {<span class="str">"item_name"</span>: item.name, <span class="str">"item_price"</span>: item.price}
+
+<span class="kw">if</span> __name__ == <span class="str">"__main__"</span>:
+    app.run(host=<span class="str">"127.0.0.1"</span>, port=<span class="num">8000</span>)</code></pre>
+
+      <h3>Development Auto-Reload Mode</h3>
+      <pre><code>app.run(host=<span class="str">"127.0.0.1"</span>, port=<span class="num">8000</span>, reload=<span class="kw">True</span>)</code></pre>
+    </div>
+
+    <!-- ================= TAB 3: BENCHMARKS ================= -->
+    <div id="benchmarks" class="tab-pane">
+      <span class="eyebrow">Verified Empirical Benchmark Results · 2026-07-30</span>
+      <h1 style="font-family: var(--font-display); font-size: 2.5rem; margin-top: 10px;">📊 Comprehensive CRUD Performance Report</h1>
+      <p style="color: var(--text-muted); font-size: 1.1rem;">
+        Tested on 1,000 pre-seeded SQLite database rows using identical schemas, Pydantic data models, and persistent concurrent HTTP connections.
+      </p>
 
       <div class="grid-3">
         <div class="metric-card success">
-          <div class="metric-label">Write Operation Speedup (DELETE)</div>
+          <div class="metric-label">DELETE Speedup vs FastAPI</div>
           <div class="metric-value" style="color: var(--success);">12.16x</div>
-          <div class="metric-label">4,422.77 req/s (6.7ms)</div>
+          <div class="metric-label">4,422 req/s (6.7ms avg)</div>
           <div class="metric-badge">🚀 Outperforms FastAPI</div>
         </div>
         <div class="metric-card success">
           <div class="metric-label">PUT Update Speedup</div>
           <div class="metric-value" style="color: var(--success);">9.29x</div>
-          <div class="metric-label">2,944.72 req/s (10.1ms)</div>
+          <div class="metric-label">2,944 req/s (10.1ms avg)</div>
           <div class="metric-badge">🚀 Outperforms FastAPI</div>
         </div>
         <div class="metric-card success">
-          <div class="metric-label">POST Create Record Speedup</div>
+          <div class="metric-label">POST Create Speedup</div>
           <div class="metric-value" style="color: var(--success);">5.98x</div>
-          <div class="metric-label">1,753.78 req/s (17.1ms)</div>
+          <div class="metric-label">1,753 req/s (17.1ms avg)</div>
           <div class="metric-badge">🚀 Outperforms FastAPI</div>
         </div>
       </div>
 
-      <p style="margin-top: 20px;">
-        <a href="benchmarks.html" class="btn btn-secondary">👉 Explore Complete Multi-Tier Benchmark Dashboard &rarr;</a>
-      </p>
-    </section>
+      <h3>📈 1. Python Surface Routes (Tier 1/2) — Pure FastAPI Compatibility Table</h3>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Test Case &amp; Operation</th>
+              <th>FastAPI (Python Stack)</th>
+              <th>RustAPI Tier 1/2 (Optimized Engine)</th>
+              <th>RustAPI Speedup Advantage</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>GET List (1,000 Rows)</strong> (<code>GET /books</code>)</td>
+              <td>17.11 req/s (1,752.9ms)</td>
+              <td><strong>121.89 req/s</strong> (246.1ms)</td>
+              <td><span class="badge badge-success">🚀 7.12x FASTER</span></td>
+            </tr>
+            <tr>
+              <td><strong>GET Single Row</strong> (<code>GET /books/1</code>)</td>
+              <td>1,131.25 req/s (26.5ms)</td>
+              <td><strong>3,580.27 req/s</strong> (8.3ms)</td>
+              <td><span class="badge badge-success">🚀 3.16x FASTER</span></td>
+            </tr>
+            <tr>
+              <td><strong>POST Create Record</strong> (<code>POST /books</code>)</td>
+              <td>293.33 req/s (102.2ms)</td>
+              <td><strong>1,753.78 req/s</strong> (17.1ms)</td>
+              <td><span class="badge badge-success">🚀 5.98x FASTER</span></td>
+            </tr>
+            <tr>
+              <td><strong>PUT Update Record</strong> (<code>PUT /books/1</code>)</td>
+              <td>316.85 req/s (94.6ms)</td>
+              <td><strong>2,944.72 req/s</strong> (10.1ms)</td>
+              <td><span class="badge badge-success">🚀 9.29x FASTER</span></td>
+            </tr>
+            <tr>
+              <td><strong>DELETE Book Record</strong> (<code>DELETE /books/1</code>)</td>
+              <td>402.06 req/s (74.6ms)</td>
+              <td><strong>4,422.77 req/s</strong> (6.7ms)</td>
+              <td><span class="badge badge-success">🚀 11.00x FASTER</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
 
-    <!-- Quick Example -->
-    <section>
-      <span class="eyebrow">Clean &amp; Intuitive</span>
-      <h2>💻 Fast-Path Python Code Example</h2>
-      
+      <h3>⚡ 2. Tier 3 Native Rust Fast-Path Routes (app.add_native_route)</h3>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Endpoint &amp; Fast-Path Method</th>
+              <th>RustAPI Tier 3 Native Throughput</th>
+              <th>Avg Latency</th>
+              <th>Comparison vs FastAPI</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>GET Single Row Fast-Path</strong> (<code>GET /tier3/books/1</code>)</td>
+              <td><strong>6,218.75 req/sec</strong></td>
+              <td><strong>4.82 ms</strong></td>
+              <td><span class="badge badge-rust">🚀 5.50x FASTER than FastAPI</span></td>
+            </tr>
+            <tr>
+              <td><strong>POST Write Fast-Path</strong> (<code>POST /tier3/books</code>)</td>
+              <td><strong>3,441.10 req/sec</strong></td>
+              <td><strong>8.72 ms</strong></td>
+              <td><span class="badge badge-rust">🚀 11.73x FASTER than FastAPI</span></td>
+            </tr>
+            <tr>
+              <td><strong>Static Health Check Fast-Path</strong> (<code>/tier3/health</code>)</td>
+              <td><strong>47,034.00 req/sec</strong></td>
+              <td><strong>2.00 ms</strong></td>
+              <td><span class="badge badge-rust">⚡ Ultimate C-Speed Fast Path</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Visual Bar Chart Comparison -->
+      <h3>📊 Visual Throughput Comparison (Req/Sec)</h3>
+      <div class="card" style="margin-top: 16px;">
+        <div class="chart-bar-container">
+          <div class="chart-bar-label">
+            <span>DELETE Operation</span>
+            <span>RustAPI: 4,422 req/s vs FastAPI: 402 req/s (11.0x)</span>
+          </div>
+          <div class="chart-bar-track"><div class="chart-bar-fill rustapi" style="width: 100%;"></div></div>
+          <div class="chart-bar-track" style="margin-top: 4px;"><div class="chart-bar-fill fastapi" style="width: 9.1%;"></div></div>
+        </div>
+
+        <div class="chart-bar-container">
+          <div class="chart-bar-label">
+            <span>PUT Operation</span>
+            <span>RustAPI: 2,944 req/s vs FastAPI: 316 req/s (9.29x)</span>
+          </div>
+          <div class="chart-bar-track"><div class="chart-bar-fill rustapi" style="width: 100%;"></div></div>
+          <div class="chart-bar-track" style="margin-top: 4px;"><div class="chart-bar-fill fastapi" style="width: 10.7%;"></div></div>
+        </div>
+
+        <div class="chart-bar-container">
+          <div class="chart-bar-label">
+            <span>POST Operation (Create Record)</span>
+            <span>RustAPI: 1,753 req/s vs FastAPI: 293 req/s (5.98x)</span>
+          </div>
+          <div class="chart-bar-track"><div class="chart-bar-fill rustapi" style="width: 100%;"></div></div>
+          <div class="chart-bar-track" style="margin-top: 4px;"><div class="chart-bar-fill fastapi" style="width: 16.7%;"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= TAB 4: DATABASE ENGINE ================= -->
+    <div id="database" class="tab-pane">
+      <span class="eyebrow">Zero-Copy Streaming</span>
+      <h1 style="font-family: var(--font-display); font-size: 2.5rem; margin-top: 10px;">🗄️ Rust-Native Database Engine</h1>
+      <p style="color: var(--text-muted); font-size: 1.1rem;">
+        RustAPI embeds high-concurrency <code>sqlx</code> connection pooling directly inside the engine for PostgreSQL and SQLite.
+      </p>
+
       <pre><code><span class="kw">import</span> rustapi
-<span class="kw">from</span> pydantic <span class="kw">import</span> BaseModel
 
 app = rustapi.Engine()
-db = app.connect_db(<span class="str">"sqlite::memory:"</span>)
+db = app.connect_db(<span class="str">"sqlite://data.db"</span>)
 
-<span class="kw">class</span> UserCreate(BaseModel):
-    name: str
-    email: str
+<span class="dec">@app.get</span>(<span class="str">"/products"</span>)
+<span class="kw">def</span> get_products():
+    <span class="com"># Streams raw JSON direct from sqlx -> socket without Python dict allocation</span>
+    <span class="kw">return</span> db.query_json(<span class="str">"SELECT id, name, price FROM products"</span>)
 
-<span class="dec">@app.post</span>(<span class="str">"/users"</span>)
-<span class="kw">def</span> create_user(user: UserCreate):
-    db.execute(f<span class="str">"INSERT INTO users (name, email) VALUES ('{user.name}', '{user.email}')"</span>)
-    <span class="kw">return</span> {<span class="str">"status"</span>: <span class="str">"created"</span>}
+<span class="dec">@app.post</span>(<span class="str">"/products"</span>)
+<span class="kw">def</span> create_product(name: str, price: float):
+    affected = db.execute(f<span class="str">"INSERT INTO products (name, price) VALUES ('{name}', {price})"</span>)
+    <span class="kw">return</span> {<span class="str">"status"</span>: <span class="str">"created"</span>, <span class="str">"affected"</span>: affected}</code></pre>
+    </div>
 
-<span class="dec">@app.get</span>(<span class="str">"/users"</span>)
-<span class="kw">def</span> list_users():
-    <span class="com"># Streams query results as JSON directly from sqlx connection pool to Hyper socket</span>
-    <span class="kw">return</span> db.query_json(<span class="str">"SELECT * FROM users"</span>)
+    <!-- ================= TAB 5: SECURITY ================= -->
+    <div id="security" class="tab-pane">
+      <span class="eyebrow">Embedded Security</span>
+      <h1 style="font-family: var(--font-display); font-size: 2.5rem; margin-top: 10px;">🔐 Embedded Rust Security Primitives</h1>
+      
+      <h3>1. Native JWT Engine (<code>jsonwebtoken</code> crate)</h3>
+      <pre><code><span class="kw">import</span> rustapi
 
-<span class="kw">if</span> __name__ == <span class="str">"__main__"</span>:
-    app.run(host=<span class="str">"127.0.0.1"</span>, port=<span class="num">8000</span>)</code></pre>
-    </section>
+token = rustapi.encode_jwt({<span class="str">"sub"</span>: <span class="str">"user_100"</span>}, secret=<span class="str">"secret_key"</span>)
+claims = rustapi.decode_jwt(token, secret=<span class="str">"secret_key"</span>)</code></pre>
+
+      <h3>2. Argon2 Password Hashing</h3>
+      <pre><code>hashed = rustapi.hash_password(<span class="str">"mypassword123"</span>)
+is_valid = rustapi.verify_password(<span class="str">"mypassword123"</span>, hashed)</code></pre>
+
+      <h3>3. Native MiniJinja Renderer</h3>
+      <pre><code>html = rustapi.render_template(<span class="str">"&lt;h1&gt;Welcome {{ name }}!&lt;/h1&gt;"</span>, {<span class="str">"name"</span>: <span class="str">"Boopathi"</span>})</code></pre>
+    </div>
+
+    <!-- ================= TAB 6: MCP SERVER ================= -->
+    <div id="mcp" class="tab-pane">
+      <span class="eyebrow">AI Agent Protocol</span>
+      <h1 style="font-family: var(--font-display); font-size: 2.5rem; margin-top: 10px;">🤖 Built-in Model Context Protocol (MCP) Server</h1>
+      <p style="color: var(--text-muted); font-size: 1.1rem;">
+        Expose tools, resources, and prompts to Claude &amp; AI agents via Model Context Protocol (JSON-RPC over Streamable HTTP) at <code>POST /mcp</code>.
+      </p>
+
+      <pre><code><span class="dec">@app.tool</span>(description=<span class="str">"Search catalog for AI agents"</span>)
+<span class="kw">def</span> search_catalog(category: str):
+    <span class="kw">return</span> f<span class="str">"Found 5 items in {category}"</span>
+
+<span class="dec">@app.resource</span>(uri=<span class="str">"config://system"</span>, mime_type=<span class="str">"application/json"</span>)
+<span class="kw">def</span> get_system_config():
+    <span class="kw">return</span> <span class="str">'{"status": "healthy"}'</span></code></pre>
+    </div>
+
+    <!-- ================= TAB 7: API REFERENCE ================= -->
+    <div id="api-reference" class="tab-pane">
+      <span class="eyebrow">Public API</span>
+      <h1 style="font-family: var(--font-display); font-size: 2.5rem; margin-top: 10px;">📖 Complete API Reference</h1>
+      
+      <div class="card">
+        <h3><code>rustapi.Engine(title="RustAPI", version="0.1.0")</code></h3>
+        <p>Main application container initializing Tokio runtime, Hyper HTTP service, and router tables.</p>
+        <ul>
+          <li><code>app.get(path, response_model=None)</code>: Register GET endpoint.</li>
+          <li><code>app.post(path, response_model=None)</code>: Register POST endpoint.</li>
+          <li><code>app.put(path, response_model=None)</code>: Register PUT endpoint.</li>
+          <li><code>app.delete(path, response_model=None)</code>: Register DELETE endpoint.</li>
+          <li><code>app.add_native_route(path, body, method="GET", status_code=200)</code>: Register Tier 3 Rust fast-path.</li>
+          <li><code>app.connect_db(url)</code>: Connect to SQLite or PostgreSQL connection pool.</li>
+          <li><code>app.run(host="127.0.0.1", port=8000, reload=False)</code>: Start web server.</li>
+        </ul>
+      </div>
+    </div>
 
     <!-- Footer -->
     <footer>
-      <p>RustAPI v0.1.31 — High-Speed Python Framework powered by Tokio, Hyper, PyO3, and sqlx. MIT Licensed.</p>
+      <p>RustAPI v0.1.33 — Single Page Application (SPA) Documentation Portal. MIT Licensed.</p>
     </footer>
 
   </main>
 </div>
+
+<!-- Client-side SPA Tab Switching Logic -->
+<script>
+  function switchTab(tabId) {
+    // Hide all tab panes
+    const panes = document.querySelectorAll('.tab-pane');
+    panes.forEach(pane => pane.classList.remove('active'));
+
+    // Deactivate all navbar & sidebar tabs
+    const tabs = document.querySelectorAll('.nav-tab, .sidebar-tab');
+    tabs.forEach(t => t.classList.remove('active'));
+
+    // Activate selected tab pane
+    const targetPane = document.getElementById(tabId);
+    if (targetPane) {
+      targetPane.classList.add('active');
+    }
+
+    // Activate matching buttons
+    const activeButtons = document.querySelectorAll(`[data-tab="${tabId}"]`);
+    activeButtons.forEach(btn => btn.classList.add('active'));
+
+    // Update URL hash
+    window.location.hash = tabId;
+
+    // Scroll to top of content
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  // Handle URL hash on load
+  window.addEventListener('DOMContentLoaded', () => {
+    const hash = window.location.hash.replace('#', '');
+    if (hash && document.getElementById(hash)) {
+      switchTab(hash);
+    }
+  });
+</script>
 
 </body>
 </html>
