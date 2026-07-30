@@ -1,4 +1,4 @@
-# ⚡ RustAPI
+# RustAPI
 
 ![RustAPI Logo](https://raw.githubusercontent.com/rajboopathiking/rustapi/master/pyrustapi-logo.png)
 
