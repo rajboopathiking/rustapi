@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RustAPI — Security & Power Primitives (JWT, Argon2, MiniJinja)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0d10;
+    --surface-1: #13171f;
+    --surface-2: #1c222d;
+    --surface-3: #252d3c;
+    --border: #2e384a;
+    --border-light: #3a475d;
+    --text: #f0f4f8;
+    --text-muted: #94a3b8;
+    --text-dim: #64748b;
+    --rust: #f95738;
+    --rust-hover: #e04324;
+    --rust-dim: rgba(249, 87, 56, 0.15);
+    --python: #38bdf8;
+    --success: #10b981;
+    --radius: 8px;
+    --radius-lg: 12px;
+    --font-display: 'Space Grotesk', sans-serif;
+    --font-body: 'Inter', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--font-body); font-size: 15px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--rust); text-decoration: none; transition: color 0.15s; }
+  a:hover { color: var(--rust-hover); text-decoration: underline; }
+  code, pre { font-family: var(--font-mono); }
+  ::selection { background: var(--rust); color: #fff; }
+
+  /* Navigation Bar */
+  .navbar {
+    position: sticky; top: 0; z-index: 100; background: rgba(11, 13, 16, 0.95);
+    backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    padding: 14px 28px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .nav-brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-weight: 700; font-size: 1.25rem; }
+  .nav-brand img { height: 38px; width: auto; border-radius: 6px; }
+  .nav-links { display: flex; gap: 20px; align-items: center; }
+  .nav-links a {
+    color: var(--text-muted); font-size: 0.9rem; font-weight: 500; padding: 6px 12px;
+    border-radius: var(--radius); transition: all 0.15s ease;
+  }
+  .nav-links a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
+  .nav-links a.active { color: var(--rust); background: var(--rust-dim); font-weight: 600; }
+
+  /* Shell Layout */
+  .shell { display: flex; max-width: 1400px; margin: 0 auto; min-height: calc(100vh - 67px); }
+  .sidebar {
+    width: 260px; flex-shrink: 0; position: sticky; top: 67px; align-self: flex-start;
+    height: calc(100vh - 67px); overflow-y: auto; padding: 28px 20px; border-right: 1px solid var(--border);
+    background: rgba(11, 13, 16, 0.5);
+  }
+  .sidebar nav { display: flex; flex-direction: column; gap: 4px; }
+  .sidebar nav a {
+    color: var(--text-muted); font-size: 0.88rem; padding: 8px 12px; border-radius: var(--radius);
+    transition: all 0.15s ease; font-weight: 500;
+  }
+  .sidebar nav a:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
+  .sidebar nav a.active { background: var(--rust-dim); color: var(--rust); font-weight: 600; }
+  .sidebar-category {
+    font-family: var(--font-mono); font-size: 0.68rem; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--text-dim); margin: 16px 0 6px 12px;
+  }
+
+  .content { flex: 1; min-width: 0; padding: 0 56px 120px; }
+  .content section { padding-top: 56px; border-bottom: 1px solid var(--border); padding-bottom: 48px; }
+  .content section:last-of-type { border-bottom: none; }
+
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--rust); background: var(--rust-dim); padding: 4px 14px; border-radius: 20px;
+    display: inline-block; margin-bottom: 20px; border: 1px solid rgba(249, 87, 56, 0.3);
+  }
+
+  pre {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-lg);
+    padding: 20px 24px; overflow-x: auto; font-size: 0.88rem; line-height: 1.6; color: #e2e8f0;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);
+  }
+  code:not(pre code) { background: var(--surface-2); padding: 2px 7px; border-radius: 4px; font-size: 0.85em; color: var(--rust); border: 1px solid var(--border); }
+  .kw { color: #f472b6; font-weight: 600; }
+  .dec { color: var(--rust); font-weight: 600; }
+  .str { color: #a3e635; }
+  .com { color: var(--text-dim); font-style: italic; }
+
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 24px; margin: 16px 0; }
+  .card h3 { font-family: var(--font-display); font-size: 1.15rem; margin: 0 0 8px; font-weight: 600; color: #fff; }
+
+  footer { margin-top: 80px; padding: 40px 0; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.85rem; text-align: center; }
+
+  @media (max-width: 900px) {
+    .shell { display: block; }
+    .sidebar { position: relative; width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); top: 0; }
+    .content { padding: 0 20px 80px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="navbar">
+  <div class="nav-brand">
+    <img src="pyrustapi-logo%20(1).png" alt="RustAPI Logo" />
+    <span>RustAPI ⚡</span>
+  </div>
+  <nav class="nav-links">
+    <a href="index.html">Home</a>
+    <a href="getting-started.html">Getting Started</a>
+    <a href="benchmarks.html">Benchmarks Report</a>
+    <a href="database.html">Database Engine</a>
+    <a href="security-power-modules.html" class="active">Security Modules</a>
+    <a href="mcp-server.html">MCP AI Protocol</a>
+    <a href="api-reference.html">API Reference</a>
+  </nav>
+</header>
+
+<div class="shell">
+  <aside class="sidebar">
+    <nav>
+      <div class="sidebar-category">Power Modules</div>
+      <a href="#jwt" class="active">Rust JWT Engine</a>
+      <a href="#argon2">Argon2 Password Hashing</a>
+      <a href="#minijinja">MiniJinja Templates</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+
+    <section id="jwt">
+      <span class="eyebrow">Zero External Python Libraries</span>
+      <h1 style="font-family: var(--font-display); font-size: 2.6rem; margin-top: 10px;">🔐 Embedded Rust Power Modules</h1>
+      <p style="color: var(--text-muted); font-size: 1.1rem;">
+        RustAPI embeds high-speed security primitives directly into compiled Rust binary extensions, eliminating Python package dependencies like <code>PyJWT</code> or <code>passlib</code>.
+      </p>
+
+      <h3>1. Native JWT Engine (<code>jsonwebtoken</code> crate)</h3>
+      <pre><code><span class="kw">import</span> rustapi
+
+<span class="com"># Encode JSON Web Tokens natively in Rust</span>
+token = rustapi.encode_jwt(
+    claims={<span class="str">"sub"</span>: <span class="str">"user_100"</span>, <span class="str">"role"</span>: <span class="str">"admin"</span>},
+    secret=<span class="str">"secret_key_123"</span>,
+    algorithm=<span class="str">"HS256"</span>
+)
+
+<span class="com"># Decode and validate tokens in Rust</span>
+claims = rustapi.decode_jwt(token, secret=<span class="str">"secret_key_123"</span>, algorithm=<span class="str">"HS256"</span>)
+print(claims[<span class="str">"sub"</span>]) <span class="com"># "user_100"</span></code></pre>
+    </section>
+
+    <section id="argon2">
+      <span class="eyebrow">Password Security</span>
+      <h2>🛡️ High-Speed Password Hashing (Argon2)</h2>
+      <p>Hash and verify user passwords using compiled Rust Argon2 implementations executing on background Tokio worker pools:</p>
+
+      <pre><code><span class="kw">import</span> rustapi
+
+<span class="com"># Hash password with secure random salt</span>
+hashed = rustapi.hash_password(<span class="str">"super_secret_password"</span>)
+
+<span class="com"># Verify password against hash</span>
+valid = rustapi.verify_password(<span class="str">"super_secret_password"</span>, hashed)
+print(valid) <span class="com"># True</span></code></pre>
+    </section>
+
+    <section id="minijinja">
+      <span class="eyebrow">Native Template Rendering</span>
+      <h2>🎨 MiniJinja Template Renderer</h2>
+      <p>Render Jinja2-compatible HTML templates natively inside Rust memory without Jinja2 Python package overhead:</p>
+
+      <pre><code><span class="kw">import</span> rustapi
+
+<span class="dec">@app.get</span>(<span class="str">"/welcome"</span>)
+<span class="kw">def</span> welcome():
+    html = rustapi.render_template(
+        <span class="str">"&lt;h1&gt;Welcome {{ name }}!&lt;/h1&gt;&lt;p&gt;Active items: {{ items | length }}&lt;/p&gt;"</span>,
+        {<span class="str">"name"</span>: <span class="str">"Boopathi"</span>, <span class="str">"items"</span>: [<span class="str">"A"</span>, <span class="str">"B"</span>, <span class="str">"C"</span>]}
+    )
+    <span class="kw">return</span> rustapi.HTMLResponse(html)</code></pre>
+    </section>
+
+    <footer>
+      <p>RustAPI v0.1.31 — Built with Tokio, Hyper, PyO3, and sqlx. MIT Licensed.</p>
+    </footer>
+
+  </main>
+</div>
+
+</body>
+</html>
