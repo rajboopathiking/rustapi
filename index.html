@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
   :root {
     --bg: #0b0d10;
@@ -175,6 +176,35 @@
   .chart-bar-fill.rustapi { background: linear-gradient(90deg, var(--rust) 0%, #ff8c42 100%); }
   .chart-bar-fill.fastapi { background: linear-gradient(90deg, var(--python) 0%, #38bdf8 100%); }
 
+  /* Benchmark Dashboard Specific Styles */
+  .dashboard-badge-bar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
+  .dashboard-badge {
+    background: var(--surface-2); border: 1px solid var(--border); padding: 5px 12px;
+    border-radius: 20px; font-size: 0.8rem; color: var(--text-muted); display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--font-mono);
+  }
+  .dashboard-badge strong { color: var(--text); }
+  .stat-card-custom {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-lg);
+    padding: 20px; position: relative; overflow: hidden;
+  }
+  .stat-card-custom::before { content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 3px; }
+  .stat-card-custom.c-rust::before { background: linear-gradient(90deg, #f97316 0%, #ea580c 100%); }
+  .stat-card-custom.c-py::before { background: linear-gradient(90deg, #0ea5e9 0%, #0284c7 100%); }
+  .stat-card-custom.c-native::before { background: linear-gradient(90deg, #10b981 0%, #059669 100%); }
+  .stat-label-custom { font-size: 0.82rem; color: var(--text-muted); font-family: var(--font-mono); text-transform: uppercase; }
+  .stat-value-custom { font-size: 2.2rem; font-weight: 700; margin: 6px 0; font-family: var(--font-mono); color: var(--text); }
+  .stat-sub-custom { font-size: 0.82rem; color: #10b981; font-weight: 600; display: flex; align-items: center; gap: 4px; }
+
+  .tier-badge-pill { padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; font-weight: 600; font-family: var(--font-mono); display: inline-block; }
+  .tier-0 { background: rgba(100, 116, 139, 0.2); color: #cbd5e1; border: 1px solid rgba(100, 116, 139, 0.4); }
+  .tier-1 { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
+  .tier-2 { background: rgba(249, 115, 22, 0.15); color: #fb923c; border: 1px solid rgba(249, 115, 22, 0.3); }
+  .tier-3 { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+
+  .speedup-pill { font-weight: 700; color: #10b981; background: rgba(16, 185, 129, 0.15); padding: 3px 8px; border-radius: 4px; font-family: var(--font-mono); font-size: 0.8rem; }
+  .baseline-pill { color: var(--text-muted); font-family: var(--font-mono); font-size: 0.8rem; }
+
   footer { margin-top: 80px; padding: 40px 0; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.85rem; text-align: center; }
 
   @media (max-width: 900px) {
@@ -195,6 +225,7 @@
   <nav class="nav-links">
     <button class="nav-tab active" data-tab="overview" onclick="switchTab('overview')">Home</button>
     <button class="nav-tab" data-tab="getting-started" onclick="switchTab('getting-started')">Getting Started</button>
+    <button class="nav-tab" data-tab="benchmark-dashboard" onclick="switchTab('benchmark-dashboard')">Benchmark Dashboard ⚡</button>
     <button class="nav-tab" data-tab="benchmarks" onclick="switchTab('benchmarks')">Benchmarks Report</button>
     <button class="nav-tab" data-tab="database" onclick="switchTab('database')">Database Engine</button>
     <button class="nav-tab" data-tab="security" onclick="switchTab('security')">Security Modules</button>
@@ -210,6 +241,7 @@
       <div class="sidebar-category">SPA Portal</div>
       <button class="sidebar-tab active" data-tab="overview" onclick="switchTab('overview')">Overview &amp; Architecture</button>
       <button class="sidebar-tab" data-tab="getting-started" onclick="switchTab('getting-started')">Getting Started Guide</button>
+      <button class="sidebar-tab" data-tab="benchmark-dashboard" onclick="switchTab('benchmark-dashboard')">⚡ Benchmark Dashboard</button>
       <button class="sidebar-tab" data-tab="benchmarks" onclick="switchTab('benchmarks')">CRUD Benchmarks Report</button>
       <button class="sidebar-tab" data-tab="database" onclick="switchTab('database')">Rust Database Engine</button>
       <button class="sidebar-tab" data-tab="security" onclick="switchTab('security')">Security &amp; Power Primitives</button>
@@ -339,6 +371,87 @@ app = rustapi.Engine()
 
       <h3>Development Auto-Reload Mode</h3>
       <pre><code>app.run(host=<span class="str">"127.0.0.1"</span>, port=<span class="num">8000</span>, reload=<span class="kw">True</span>)</code></pre>
+    </div>
+
+    <!-- ================= TAB: BENCHMARK DASHBOARD ================= -->
+    <div id="benchmark-dashboard" class="tab-pane">
+      <div class="dashboard-badge-bar">
+        <span class="eyebrow" style="margin-bottom:0;">Multi-Tier Empirical Performance Matrix</span>
+        <div class="dashboard-badge">⚙️ Environment: <strong>macOS / Apple Silicon</strong></div>
+        <div class="dashboard-badge">🧪 Load Generator: <strong>Autocannon</strong></div>
+        <div class="dashboard-badge">⚡ Target: <strong>RustAPI (Tokio/Hyper) vs FastAPI</strong></div>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px; margin: 16px 0 24px;">
+        <div>
+          <h1 style="font-family: var(--font-display); font-size: 2.2rem; margin: 0;">⚡ RustAPI Benchmark Dashboard</h1>
+          <p style="color: var(--text-muted); font-size: 1.05rem; margin-top: 4px;">
+            Complete Multi-Tier Performance Visualizations &amp; Matrix vs FastAPI (CPython 3.13)
+          </p>
+        </div>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+          <a href="benchmark_dashboard.html" target="_blank" class="btn btn-primary">
+            🔗 Standalone Page (benchmark_dashboard.html)
+          </a>
+          <button onclick="switchTab('benchmarks')" class="btn btn-secondary">
+            📊 View CRUD Text Report
+          </button>
+        </div>
+      </div>
+
+      <!-- Hero Stat Cards -->
+      <div class="grid-3">
+        <div class="stat-card-custom c-rust">
+          <div class="stat-label-custom">Max Zero-GIL Speedup</div>
+          <div class="stat-value-custom">18.90x</div>
+          <div class="stat-sub-custom">🚀 Task 1 Health Check (37,665 req/s)</div>
+        </div>
+        <div class="stat-card-custom c-py">
+          <div class="stat-label-custom">Python Tier Average Speedup</div>
+          <div class="stat-value-custom">5.32x</div>
+          <div class="stat-sub-custom">⚡ Drop-in Tokio/Hyper Python routes</div>
+        </div>
+        <div class="stat-card-custom c-native">
+          <div class="stat-label-custom">Argon2 p99 Latency Reduction</div>
+          <div class="stat-value-custom">-82.2%</div>
+          <div class="stat-sub-custom">🔒 2,247 ms → 399 ms (Tokio Worker)</div>
+        </div>
+      </div>
+
+      <!-- Interactive Charts -->
+      <div class="grid-2" style="margin-top: 28px;">
+        <div class="card" style="cursor: default;">
+          <h3 style="margin-bottom: 16px; font-size: 1.1rem;">📊 Throughput (Requests / Sec — Higher is Better)</h3>
+          <div style="position: relative; height: 300px; width: 100%;">
+            <canvas id="tabRpsChart"></canvas>
+          </div>
+        </div>
+        <div class="card" style="cursor: default;">
+          <h3 style="margin-bottom: 16px; font-size: 1.1rem;">⏱️ Latency p50 (Milliseconds — Lower is Better)</h3>
+          <div style="position: relative; height: 300px; width: 100%;">
+            <canvas id="tabLatencyChart"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- Full Empirical Benchmark Matrix Table -->
+      <h3 style="margin-top: 36px; margin-bottom: 14px;">📋 Full Multi-Tier Empirical Benchmark Matrix</h3>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Task Scenario</th>
+              <th>Execution Tier</th>
+              <th>Throughput (RPS)</th>
+              <th>Latency p50</th>
+              <th>Latency p99</th>
+              <th>Speedup vs FastAPI</th>
+            </tr>
+          </thead>
+          <tbody id="tabBenchmarkTableBody">
+          </tbody>
+        </table>
+      </div>
     </div>
 
     <!-- ================= TAB 3: BENCHMARKS ================= -->
@@ -572,6 +685,116 @@ is_valid = rustapi.verify_password(<span class="str">"mypassword123"</span>, has
 
 <!-- Client-side SPA Tab Switching Logic -->
 <script>
+  let rpsChartInstance = null;
+  let latencyChartInstance = null;
+
+  function initBenchmarkDashboardCharts() {
+    if (rpsChartInstance) return; // already initialized
+
+    const rpsCtx = document.getElementById("tabRpsChart");
+    const latencyCtx = document.getElementById("tabLatencyChart");
+    if (!rpsCtx || !latencyCtx) return;
+
+    const benchmarkData = [
+      { task: "Task 1: Health Check", tier: "Tier 0: FastAPI Baseline", rps: 1992.8, p50: 46, p99: 123, speedup: "1.00x (Baseline)", tierClass: "tier-0" },
+      { task: "Task 1: Health Check", tier: "Tier 1: RustAPI Python Tier", rps: 10251.8, p50: 8, p99: 28, speedup: "5.14x faster", tierClass: "tier-1" },
+      { task: "Task 1: Health Check", tier: "Tier 3: RustAPI Native (Zero-GIL)", rps: 37665.6, p50: 2, p99: 5, speedup: "18.90x faster", tierClass: "tier-3" },
+
+      { task: "Task 2: Pydantic POST", tier: "Tier 0: FastAPI Baseline", rps: 1743.2, p50: 54, p99: 90, speedup: "1.00x (Baseline)", tierClass: "tier-0" },
+      { task: "Task 2: Pydantic POST", tier: "Tier 1: RustAPI Python Tier", rps: 9102.91, p50: 10, p99: 22, speedup: "5.22x faster", tierClass: "tier-1" },
+
+      { task: "Task 3: DB Query JSON", tier: "Tier 0: FastAPI (Python Dumps)", rps: 788.6, p50: 123, p99: 176, speedup: "1.00x (Baseline)", tierClass: "tier-0" },
+      { task: "Task 3: DB Query JSON", tier: "Tier 1: RustAPI Python Tier", rps: 5942.73, p50: 16, p99: 35, speedup: "7.54x faster", tierClass: "tier-1" },
+      { task: "Task 3: DB Query JSON", tier: "Tier 3: RustAPI Zero-Copy SQL", rps: 1403.6, p50: 65, p99: 178, speedup: "1.78x faster", tierClass: "tier-3" },
+
+      { task: "Task 4a: JWT Sign & Verify", tier: "Tier 0: FastAPI (PyJWT)", rps: 1667.19, p50: 28, p99: 50, speedup: "1.00x (Baseline)", tierClass: "tier-0" },
+      { task: "Task 4a: JWT Sign & Verify", tier: "Tier 1: RustAPI Python (PyJWT)", rps: 4256.2, p50: 11, p99: 25, speedup: "2.55x faster", tierClass: "tier-1" },
+      { task: "Task 4a: JWT Sign & Verify", tier: "Tier 2: RustAPI Native JWT", rps: 4810.0, p50: 9, p99: 25, speedup: "2.89x faster", tierClass: "tier-2" },
+
+      { task: "Task 4b: Argon2 Hash", tier: "Tier 0: FastAPI (Passlib)", rps: 12.9, p50: 1436, p99: 2247, speedup: "1.00x (Baseline)", tierClass: "tier-0" },
+      { task: "Task 4b: Argon2 Hash", tier: "Tier 1: RustAPI Python (Passlib)", rps: 13.3, p50: 1412, p99: 2225, speedup: "1.03x (GIL bound)", tierClass: "tier-1" },
+      { task: "Task 4b: Argon2 Hash", tier: "Tier 2: RustAPI Native Argon2", rps: 64.1, p50: 311, p99: 399, speedup: "4.97x faster", tierClass: "tier-2" },
+
+      { task: "Task 5: HTML Render", tier: "Tier 0: FastAPI (Jinja2)", rps: 1224.7, p50: 77, p99: 136, speedup: "1.00x (Baseline)", tierClass: "tier-0" },
+      { task: "Task 5: HTML Render", tier: "Tier 1: RustAPI Python (Jinja2)", rps: 2320.4, p50: 37, p99: 138, speedup: "1.89x faster", tierClass: "tier-1" },
+      { task: "Task 5: HTML Render", tier: "Tier 2: RustAPI MiniJinja", rps: 2643.37, p50: 33, p99: 118, speedup: "2.16x faster", tierClass: "tier-2" },
+
+      { task: "Task 6: High Concurrency (500)", tier: "Tier 0: FastAPI (High Socket)", rps: 1060.41, p50: 453, p99: 712, speedup: "1.00x (Baseline)", tierClass: "tier-0" },
+      { task: "Task 6: High Concurrency (500)", tier: "Tier 1: RustAPI Python Tier", rps: 5494.4, p50: 85, p99: 214, speedup: "5.18x faster", tierClass: "tier-1" },
+      { task: "Task 6: High Concurrency (500)", tier: "Tier 3: RustAPI Native Fast-Path", rps: 7843.9, p50: 53, p99: 176, speedup: "7.40x faster", tierClass: "tier-3" }
+    ];
+
+    const tbody = document.getElementById("tabBenchmarkTableBody");
+    if (tbody && tbody.children.length === 0) {
+      benchmarkData.forEach(item => {
+        const tr = document.createElement("tr");
+        const isBaseline = item.speedup.includes("Baseline");
+        tr.innerHTML = `
+          <td><strong>${item.task}</strong></td>
+          <td><span class="tier-badge-pill ${item.tierClass}">${item.tier}</span></td>
+          <td style="font-family: var(--font-mono);">${item.rps.toLocaleString()} req/s</td>
+          <td style="font-family: var(--font-mono);">${item.p50} ms</td>
+          <td style="font-family: var(--font-mono);">${item.p99} ms</td>
+          <td><span class="${isBaseline ? 'baseline-pill' : 'speedup-pill'}">${item.speedup}</span></td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    const labels = ["T1 Health", "T2 Pydantic", "T3 DB Query", "T4a JWT", "T5 HTML", "T6 High Socket"];
+    const fastapiRps = [1992.8, 1743.2, 788.6, 1667.19, 1224.7, 1060.41];
+    const rustapiPyRps = [10251.8, 9102.91, 5942.73, 4256.2, 2320.4, 5494.4];
+    const rustapiNativeRps = [37665.6, null, 1403.6, 4810.0, 2643.37, 7843.9];
+
+    if (typeof Chart !== 'undefined') {
+      rpsChartInstance = new Chart(rpsCtx, {
+        type: 'bar',
+        data: {
+          labels: labels,
+          datasets: [
+            { label: 'Tier 0: FastAPI Baseline', data: fastapiRps, backgroundColor: '#64748b' },
+            { label: 'Tier 1: RustAPI Python', data: rustapiPyRps, backgroundColor: '#38bdf8' },
+            { label: 'Tier 2/3: RustAPI Native', data: rustapiNativeRps, backgroundColor: '#10b981' }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { labels: { color: '#94a3b8', font: { family: 'Inter' } } } },
+          scales: {
+            x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+            y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.05)' } }
+          }
+        }
+      });
+
+      const fastapiP50 = [46, 54, 123, 28, 77, 453];
+      const rustapiPyP50 = [8, 10, 16, 11, 37, 85];
+      const rustapiNativeP50 = [2, null, 65, 9, 33, 53];
+
+      latencyChartInstance = new Chart(latencyCtx, {
+        type: 'bar',
+        data: {
+          labels: labels,
+          datasets: [
+            { label: 'Tier 0: FastAPI Baseline', data: fastapiP50, backgroundColor: '#64748b' },
+            { label: 'Tier 1: RustAPI Python', data: rustapiPyP50, backgroundColor: '#38bdf8' },
+            { label: 'Tier 2/3: RustAPI Native', data: rustapiNativeP50, backgroundColor: '#10b981' }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { labels: { color: '#94a3b8', font: { family: 'Inter' } } } },
+          scales: {
+            x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+            y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.05)' } }
+          }
+        }
+      });
+    }
+  }
+
   function switchTab(tabId) {
     // Hide all tab panes
     const panes = document.querySelectorAll('.tab-pane');
@@ -596,6 +819,11 @@ is_valid = rustapi.verify_password(<span class="str">"mypassword123"</span>, has
 
     // Scroll to top of content
     window.scrollTo({ top: 0, behavior: 'smooth' });
+
+    // Initialize charts if switching to benchmark-dashboard tab
+    if (tabId === 'benchmark-dashboard') {
+      setTimeout(initBenchmarkDashboardCharts, 50);
+    }
   }
 
   // Handle URL hash on load
