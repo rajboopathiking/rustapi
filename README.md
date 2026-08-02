@@ -38,6 +38,7 @@ Detailed documentation is available in the [`docs/`](docs/) directory and projec
 - [🔐 Embedded Rust Power Primitives (JWT, Argon2, MiniJinja)](docs/power_primitives.md)
 - [🤖 Model Context Protocol (MCP) Server](docs/mcp_server.md)
 - [📦 Response Types & Request Ergonomics](docs/response_types.md)
+- [📊 Swagger UI & DX Deviations Guide](docs/swagger_ui_and_dx_deviations.md)
 - [📊 Empirical Performance Benchmark Report](performance-reports/fastapi_vs_hybrid_vs_native.md)
 
 ---
