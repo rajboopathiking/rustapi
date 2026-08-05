@@ -90,6 +90,9 @@ struct RouteEntry {
     param_types: HashMap<String, ParamType>,
     required_params: Vec<String>,
     response_model: Option<Py<PyAny>>,
+    tags: Vec<String>,
+    summary: Option<String>,
+    description: Option<String>,
 }
 
 type Routes   = Arc<StdMutex<Vec<RouteEntry>>>;
@@ -265,6 +268,24 @@ fn generate_openapi(routes: &[RouteEntry]) -> String {
     for r in routes {
         if r.is_websocket { continue; }
         let mut method_obj = json!({ "responses": { "200": { "description": "Successful Response" } } });
+
+        let mut tags_vec = r.tags.clone();
+        if tags_vec.is_empty() {
+            let first_seg = r.original_path.trim_start_matches('/').split('/').next().unwrap_or("");
+            if !first_seg.is_empty() && !first_seg.starts_with('{') {
+                tags_vec.push(first_seg.to_string());
+            }
+        }
+
+        if !tags_vec.is_empty() {
+            method_obj["tags"] = json!(tags_vec);
+        }
+        if let Some(ref sum) = r.summary {
+            method_obj["summary"] = json!(sum);
+        }
+        if let Some(ref desc) = r.description {
+            method_obj["description"] = json!(desc);
+        }
 
         // Parameters (path and query)
         let mut parameters = Vec::new();
@@ -906,18 +927,54 @@ def _schema_from_signature(func):
     }
 
     // -- Route decorators --------------------------------------------------
+    #[pyo3(signature = (method, path, is_ws, response_model=None, kwargs=None))]
+    fn make_route_decorator(&self, method: String, path: String, is_ws: bool, response_model: Option<Py<PyAny>>, kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator {
+        let mut tags = Vec::new();
+        let mut summary = None;
+        let mut description = None;
+
+        if let Some(dict) = kwargs {
+            if let Ok(Some(t_val)) = dict.get_item("tags") {
+                if let Ok(t_list) = t_val.extract::<Vec<String>>() {
+                    tags = t_list;
+                }
+            }
+            if let Ok(Some(s_val)) = dict.get_item("summary") {
+                if let Ok(s_str) = s_val.extract::<String>() {
+                    summary = Some(s_str);
+                }
+            }
+            if let Ok(Some(d_val)) = dict.get_item("description") {
+                if let Ok(d_str) = d_val.extract::<String>() {
+                    description = Some(d_str);
+                }
+            }
+        }
+
+        RouteDecorator {
+            routes: self.routes.clone(),
+            method,
+            path,
+            is_ws,
+            response_model,
+            tags,
+            summary,
+            description,
+        }
+    }
+
     #[pyo3(signature = (path, response_model=None, **_kwargs))]
-    fn get    (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "GET".into(),    path, is_ws: false, response_model } }
+    fn get    (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { self.make_route_decorator("GET".into(), path, false, response_model, _kwargs) }
     #[pyo3(signature = (path, response_model=None, **_kwargs))]
-    fn post   (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "POST".into(),   path, is_ws: false, response_model } }
+    fn post   (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { self.make_route_decorator("POST".into(), path, false, response_model, _kwargs) }
     #[pyo3(signature = (path, response_model=None, **_kwargs))]
-    fn put    (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "PUT".into(),    path, is_ws: false, response_model } }
+    fn put    (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { self.make_route_decorator("PUT".into(), path, false, response_model, _kwargs) }
     #[pyo3(signature = (path, response_model=None, **_kwargs))]
-    fn delete (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "DELETE".into(), path, is_ws: false, response_model } }
+    fn delete (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { self.make_route_decorator("DELETE".into(), path, false, response_model, _kwargs) }
     #[pyo3(signature = (path, response_model=None, **_kwargs))]
-    fn patch  (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "PATCH".into(),  path, is_ws: false, response_model } }
+    fn patch  (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { self.make_route_decorator("PATCH".into(), path, false, response_model, _kwargs) }
     #[pyo3(signature = (path, **_kwargs))]
-    fn websocket(&self, path: String, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "GET".into(), path, is_ws: true, response_model: None } }
+    fn websocket(&self, path: String, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { self.make_route_decorator("GET".into(), path, true, None, _kwargs) }
 
     #[pyo3(signature = (path, body, method="GET", status_code=200, content_type="application/json"))]
     fn add_native_route(&self, path: String, body: String, method: &str, status_code: u16, content_type: &str) {
@@ -989,6 +1046,14 @@ def _schema_from_signature(func):
     #[pyo3(signature = (router, prefix = "".to_string(), **_kwargs))]
     fn include_router(&self, py: Python<'_>, router: Py<PyAny>, prefix: String, _kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let router_prefix: String = router.getattr(py, "prefix").and_then(|p| p.extract(py)).unwrap_or_default();
+        let router_tags: Vec<String> = router.getattr(py, "tags").and_then(|t| t.extract(py)).unwrap_or_default();
+
+        let inc_tags: Vec<String> = if let Some(dict) = _kwargs {
+            dict.get_item("tags").ok().flatten().and_then(|t| t.extract().ok()).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         let base_prefix = format!("{}{}", prefix, router_prefix);
 
         for item_res in router.getattr(py, "routes")?.bind(py).iter()? {
@@ -998,15 +1063,43 @@ def _schema_from_signature(func):
             let path: String = item.get_item(1)?.extract()?;
             let func: Py<PyAny> = item.get_item(2)?.extract()?;
             let response_model: Option<Py<PyAny>> = if len > 3 { item.get_item(3)?.extract().ok() } else { None };
+            let route_kwargs: Option<Bound<'_, PyDict>> = if len > 4 { item.get_item(4)?.extract().ok() } else { None };
+
             let raw_path = format!("{}{}", base_prefix, path).replace("//", "/");
             let full_path = if raw_path.starts_with('/') { raw_path } else { format!("/{}", raw_path) };
+
+            let route_tags: Vec<String> = route_kwargs.as_ref()
+                .and_then(|dict| dict.get_item("tags").ok().flatten())
+                .and_then(|t| t.extract().ok())
+                .unwrap_or_default();
+
+            let mut merged_tags = Vec::new();
+            for t in inc_tags.iter().chain(router_tags.iter()).chain(route_tags.iter()) {
+                if !merged_tags.contains(t) {
+                    merged_tags.push(t.clone());
+                }
+            }
+
+            let kw = PyDict::new_bound(py);
+            if !merged_tags.is_empty() {
+                kw.set_item("tags", merged_tags)?;
+            }
+            if let Some(ref r_kw) = route_kwargs {
+                if let Ok(Some(s)) = r_kw.get_item("summary") {
+                    kw.set_item("summary", s)?;
+                }
+                if let Ok(Some(d)) = r_kw.get_item("description") {
+                    kw.set_item("description", d)?;
+                }
+            }
+
             match method.as_str() {
-                "GET"    => { self.get(full_path, response_model, None).__call__(py, func)?; }
-                "POST"   => { self.post(full_path, response_model, None).__call__(py, func)?; }
-                "PUT"    => { self.put(full_path, response_model, None).__call__(py, func)?; }
-                "DELETE" => { self.delete(full_path, response_model, None).__call__(py, func)?; }
-                "PATCH"  => { self.patch(full_path, response_model, None).__call__(py, func)?; }
-                "WS"     => { self.websocket(full_path, None).__call__(py, func)?; }
+                "GET"    => { self.get(full_path, response_model, Some(&kw)).__call__(py, func)?; }
+                "POST"   => { self.post(full_path, response_model, Some(&kw)).__call__(py, func)?; }
+                "PUT"    => { self.put(full_path, response_model, Some(&kw)).__call__(py, func)?; }
+                "DELETE" => { self.delete(full_path, response_model, Some(&kw)).__call__(py, func)?; }
+                "PATCH"  => { self.patch(full_path, response_model, Some(&kw)).__call__(py, func)?; }
+                "WS"     => { self.websocket(full_path, Some(&kw)).__call__(py, func)?; }
                 other    => eprintln!("include_router: unsupported method '{}'", other),
             };
         }
@@ -1951,7 +2044,16 @@ async fn handle_route(
 // ---------------------------------------------------------------------------
 
 #[pyclass]
-struct RouteDecorator { routes: Routes, method: String, path: String, is_ws: bool, response_model: Option<Py<PyAny>> }
+struct RouteDecorator {
+    routes: Routes,
+    method: String,
+    path: String,
+    is_ws: bool,
+    response_model: Option<Py<PyAny>>,
+    tags: Vec<String>,
+    summary: Option<String>,
+    description: Option<String>,
+}
 
 #[allow(non_local_definitions)]
 #[pymethods]
@@ -2115,6 +2217,9 @@ impl RouteDecorator {
             request_param_name, background_task_param_name, websocket_param_name,
             is_websocket: self.is_ws, dependencies, param_names, param_types, required_params,
             response_model: self.response_model.as_ref().map(|m| m.clone_ref(py)),
+            tags: self.tags.clone(),
+            summary: self.summary.clone(),
+            description: self.description.clone(),
         });
         Ok(func)
     }
