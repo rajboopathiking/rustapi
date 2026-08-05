@@ -214,7 +214,7 @@ class RedirectResponse(Response):
         return Response.__new__(cls, content="", status_code=status_code, headers=h)
 
 
-__version__ = "0.3.86"
+__version__ = "0.8.6"
 __all__ = [
     "Engine",
     "FastAPI",
