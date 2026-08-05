@@ -219,21 +219,25 @@ async def analyze(req: Request):
 
 ---
 
-## 8. FastAPI Migration Mismatch Resolution (v0.3.34)
+## 9. Full Python Ecosystem Interoperability & v0.3.86 / v0.1.86 Enhancements
 
-The following 6 FastAPI compatibility enhancements have been resolved natively in `pyrustapi` v0.3.34:
+`pyrustapi` features zero-limitation compatibility with the Python library ecosystem:
 
-1. **Sub-Router Nesting (`APIRouter.include_router`)**:
-   `router.include_router(sub_router, prefix="/v1", tags=["sub"])` allows sub-routers to mount additional sub-routers with inherited path prefixes and tags.
-2. **`FastAPI` Constructor Kwargs**:
-   `FastAPI(title="My API", description="...", version="1.0.0", openapi_url="/openapi.json", docs_url="/docs", redoc_url="/redoc")` accepts all standard metadata keyword arguments without constructor errors.
-3. **Custom Exception Handlers (`@app.exception_handler`)**:
-   Register custom status code or exception class handlers via `@app.exception_handler(CustomException)`.
-4. **`HTTPBearer()` Credentials Container**:
-   `security = HTTPBearer()` returns `HTTPAuthorizationCredentials(scheme="Bearer", credentials="...")` when passed to `Depends(security)`.
-5. **Recursive Dependency Injection (`solve_dependency`)**:
-   Injects `request: Request` / `req` parameters automatically and recursively resolves nested `Depends(sub_dep)` calls.
-6. **Dual Async / Sync `UploadFile` Methods**:
-   `UploadFile` methods (`file.read()`, `file.seek()`, `file.close()`) support both asynchronous (`await file.read()`) and synchronous (`file.read()`) execution, plus `.file` returns `io.BytesIO`.
+| Library Category | Supported Packages | Integration Behavior |
+| :--- | :--- | :--- |
+| **Databases & Async ORMs** | `SQLAlchemy`, `asyncpg`, `aiosqlite`, `tortoise-orm`, `peewee` | Context managers & `yield` generator sessions in `Depends(get_db)` |
+| **Data Validation** | `pydantic` v2, `msgspec`, `attrs`, `dataclasses` | Full request body parsing, field validation & 422 coercion |
+| **Security & Auth** | `pyjwt`, `python-jose`, `passlib`, `argon2-cffi`, `cryptography` | Bearer token validation, password hashing & custom claims |
+| **Machine Learning & AI** | `torch`, `tensorflow`, `numpy`, `pandas`, `scikit-learn` | In-memory matrix computation on upload byte streams |
+| **HTTP & Async Testing** | `httpx`, `requests`, `aiohttp`, `starlette.testclient` | ASGI 3.0 (`app(scope, receive, send)`) & `ASGITransport` support |
+| **Async Task Queues** | `celery`, `redis`, `rq`, `dramatiq` | Background task enqueueing inside async route handlers |
 
-```
+### Key Improvements in v0.3.86 / v0.1.86:
+
+1. **Native OpenAPI `securitySchemes` & Swagger UI "Authorize 🔓"**:
+   Automatically detects `HTTPBearer`, `OAuth2PasswordBearer(tokenUrl=...)`, `APIKeyHeader`, `APIKeyQuery`, and `HTTPBasic` dependencies to output `components.securitySchemes` in `/openapi.json`, activating interactive auth testing in Swagger UI (`/docs`).
+2. **HTTPException Status Code Preservation**:
+   Directly propagates custom status codes (`401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `422 Unprocessable Entity`) without falling back to 500 Internal Server Errors.
+3. **Recursive Dependency & Request Injection**:
+   Resolves nested `Depends(sub_dep)` chains and injects `request: Request` automatically across all dependency tiers.
+
