@@ -11,7 +11,7 @@ async def solve_dependency(
     dependency_overrides: Optional[Dict[Any, Any]] = None,
     cache: Optional[Dict[Any, Any]] = None,
 ) -> Any:
-    """Recursively resolve FastAPI dependencies with request injection and caching."""
+    """Recursively resolve FastAPI dependencies with request injection, generator support, and caching."""
     if cache is None:
         cache = {}
 
@@ -43,9 +43,17 @@ async def solve_dependency(
             # 2. Check if default value is Depends(...)
             default_val = param.default
             if isinstance(default_val, Depends):
-                sub_target = default_val.dependency or param.annotation
+                sub_target = default_val.dependency or (param.annotation if param.annotation != inspect.Parameter.empty else None)
                 kwargs[param_name] = await solve_dependency(sub_target, request, dependency_overrides, cache)
                 continue
+
+            # 3. Check Annotated metadata or type hints
+            annotated_args = getattr(param.annotation, "__metadata__", ())
+            for arg in annotated_args:
+                if isinstance(arg, Depends):
+                    sub_target = arg.dependency or param.annotation
+                    kwargs[param_name] = await solve_dependency(sub_target, request, dependency_overrides, cache)
+                    break
 
     except (ValueError, TypeError):
         sig = None
@@ -59,6 +67,12 @@ async def solve_dependency(
     else:
         if asyncio.iscoroutinefunction(dep_target) or (hasattr(dep_target, "__call__") and asyncio.iscoroutinefunction(dep_target.__call__)):
             res = await dep_target(**kwargs)
+        elif inspect.isgeneratorfunction(dep_target) or inspect.isasyncgenfunction(dep_target):
+            gen = dep_target(**kwargs)
+            if inspect.isasyncgenfunction(dep_target):
+                res = await gen.__anext__()
+            else:
+                res = next(gen)
         else:
             res = dep_target(**kwargs)
 

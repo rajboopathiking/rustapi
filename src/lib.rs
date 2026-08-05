@@ -264,6 +264,7 @@ fn compute_websocket_accept(key: &str) -> String {
 fn generate_openapi(routes: &[RouteEntry]) -> String {
     let mut paths = serde_json::Map::new();
     let mut components_schemas = serde_json::Map::new();
+    let mut security_schemes = serde_json::Map::new();
 
     for r in routes {
         if r.is_websocket { continue; }
@@ -285,6 +286,47 @@ fn generate_openapi(routes: &[RouteEntry]) -> String {
         }
         if let Some(ref desc) = r.description {
             method_obj["description"] = json!(desc);
+        }
+
+        // Security schemes collection
+        let mut route_security = Vec::new();
+        Python::with_gil(|py| {
+            for dep in &r.dependencies {
+                let bound_fn = dep.func.bind(py);
+                let type_name = bound_fn.get_type().name().map(|n| n.to_string()).unwrap_or_default();
+
+                if type_name == "HTTPBearer" || bound_fn.getattr("bearerFormat").is_ok() {
+                    let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "HTTPBearer".to_string());
+                    security_schemes.insert(s_name.clone(), json!({ "type": "http", "scheme": "bearer" }));
+                    route_security.push(json!({ s_name: [] }));
+                } else if type_name == "OAuth2PasswordBearer" || bound_fn.getattr("tokenUrl").is_ok() {
+                    let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "OAuth2PasswordBearer".to_string());
+                    let token_url = bound_fn.getattr("tokenUrl").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "/token".to_string());
+                    security_schemes.insert(s_name.clone(), json!({
+                        "type": "oauth2",
+                        "flows": { "password": { "tokenUrl": token_url, "scopes": {} } }
+                    }));
+                    route_security.push(json!({ s_name: [] }));
+                } else if type_name == "APIKeyHeader" {
+                    let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "APIKeyHeader".to_string());
+                    let key_name = bound_fn.getattr("name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "X-API-Key".to_string());
+                    security_schemes.insert(s_name.clone(), json!({ "type": "apiKey", "name": key_name, "in": "header" }));
+                    route_security.push(json!({ s_name: [] }));
+                } else if type_name == "APIKeyQuery" {
+                    let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "APIKeyQuery".to_string());
+                    let key_name = bound_fn.getattr("name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "api_key".to_string());
+                    security_schemes.insert(s_name.clone(), json!({ "type": "apiKey", "name": key_name, "in": "query" }));
+                    route_security.push(json!({ s_name: [] }));
+                } else if type_name == "HTTPBasic" {
+                    let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "HTTPBasic".to_string());
+                    security_schemes.insert(s_name.clone(), json!({ "type": "http", "scheme": "basic" }));
+                    route_security.push(json!({ s_name: [] }));
+                }
+            }
+        });
+
+        if !route_security.is_empty() {
+            method_obj["security"] = json!(route_security);
         }
 
         // Parameters (path and query)
@@ -408,8 +450,16 @@ fn generate_openapi(routes: &[RouteEntry]) -> String {
         "paths": paths
     });
 
+    let mut components = serde_json::Map::new();
     if !components_schemas.is_empty() {
-        doc["components"] = json!({ "schemas": components_schemas });
+        components.insert("schemas".to_string(), json!(components_schemas));
+    }
+    if !security_schemes.is_empty() {
+        components.insert("securitySchemes".to_string(), json!(security_schemes));
+    }
+
+    if !components.is_empty() {
+        doc["components"] = serde_json::Value::Object(components);
     }
 
     serde_json::to_string(&doc).unwrap()
@@ -1825,10 +1875,18 @@ async fn handle_route(
         });
 
     // -- Dependency injection ---------------------------------------------
-    let mut dependency_error: Option<String> = None;
+    let req_obj: PyObject = Python::with_gil(|py| {
+        Py::new(py, PyRequest {
+            method: method.clone(), path: path.clone(), path_params: path_params.clone(),
+            query_params: query_params.clone(), headers: headers_map.clone(), cookies: cookies_map.clone(),
+            form: form_map.clone(), files: files_map.clone(), body: body.clone(),
+        }).unwrap().into_any()
+    });
+
+    let mut dependency_error_response: Option<HyperResponse<Body>> = None;
     let mut resolved_args   = HashMap::<String, PyObject>::new();
-    let mut dep_cache       = HashMap::<isize, PyObject>::new();
-    let mut teardown_gens   = Vec::<PyObject>::new();
+    let dep_cache_obj       = Python::with_gil(|py| pyo3::types::PyDict::new_bound(py).into_any().unbind());
+    let teardown_gens       = Vec::<PyObject>::new();
 
     for dep in deps {
         let dep_func = Python::with_gil(|py| -> PyObject {
@@ -1842,73 +1900,106 @@ async fn handle_route(
             dep.func.clone_ref(py)
         });
 
-        if dep.use_cache {
-            if let Some(cached) = dep_cache.get(&dep.id) {
-                let v = Python::with_gil(|py| cached.clone_ref(py));
-                resolved_args.insert(dep.name.clone(), v);
-                continue;
-            }
-        }
+        let solve_coro = Python::with_gil(|py| -> PyResult<PyObject> {
+            let resolver = py.import_bound("rustapi.resolver")?;
+            let solver = resolver.getattr("solve_dependency")?;
+            let ov_bound = dependency_overrides.bind(py);
+            solver.call1((dep_func, &req_obj, ov_bound, &dep_cache_obj)).map(|c| c.unbind())
+        });
 
-        let dep_res: Result<PyObject, String> = if dep._is_async {
-            let coro = Python::with_gil(|py| dep_func.call0(py).map_err(|e| e.to_string()));
-            match coro {
-                Ok(c) => {
-                    let (tx, rx) = oneshot::channel();
-                    let sc = schedule_coro.clone();
-                    Python::with_gil(|py| {
-                        if let Ok(cb) = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) }) {
-                            let _ = sc.bind(py).call1((c, cb));
-                        }
-                    });
-                    match rx.await {
-                        Ok(Ok(res))      => Ok(res),
-                        Ok(Err(err_obj)) => Err(Python::with_gil(|py| err_obj.bind(py).to_string())),
-                        Err(_)           => Err("Asyncio dropped".to_string()),
-                    }
-                }
-                Err(e) => Err(e),
-            }
-        } else {
-            let sem        = gil_sem.clone();
-            let dep_func_c = Python::with_gil(|py| dep_func.clone_ref(py));
-            tokio::task::spawn_blocking(move || {
-                let _permit = sem.try_acquire().ok();
-                Python::with_gil(|py| dep_func_c.call0(py).map_err(|e| e.to_string()))
-            })
-            .await
-            .unwrap_or_else(|_| Err("Panic".to_string()))
-        };
-
-        match dep_res {
-            Ok(obj) => {
-                let val = Python::with_gil(|py| -> Result<PyObject, String> {
-                    if dep.is_generator {
-                        Ok(py.import_bound("builtins").unwrap().call_method1("next", (&obj,)).unwrap().into())
-                    } else {
-                        Ok(obj.clone_ref(py))
+        match solve_coro {
+            Ok(coro) => {
+                let (tx, rx) = oneshot::channel();
+                let sc = schedule_coro.clone();
+                Python::with_gil(|py| {
+                    if let Ok(cb) = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) }) {
+                        let _ = sc.bind(py).call1((coro, cb));
                     }
                 });
-                match val {
-                    Ok(v) => {
-                        if dep.is_generator { teardown_gens.push(obj); }
-                        if dep.use_cache    { dep_cache.insert(dep.id, Python::with_gil(|py| v.clone_ref(py))); }
-                        resolved_args.insert(dep.name, v);
+                match rx.await {
+                    Ok(Ok(res)) => {
+                        resolved_args.insert(dep.name, res);
                     }
-                    Err(e) => { dependency_error = Some(e); break; }
+                    Ok(Err(err_obj)) => {
+                        let resp = Python::with_gil(|py| -> HyperResponse<Body> {
+                            let bound_err = err_obj.bind(py);
+                            let status_code: u16 = bound_err.getattr("status_code")
+                                .and_then(|s| s.extract())
+                                .unwrap_or(500);
+
+                            let detail_json: String = if let Ok(detail) = bound_err.getattr("detail") {
+                                if let Ok(py_json) = py.import_bound("json") {
+                                    if let Ok(dumps_res) = py_json.call_method1("dumps", (&detail,)) {
+                                        let d_str: String = dumps_res.extract().unwrap_or_default();
+                                        format!(r#"{{"detail":{}}}"#, d_str)
+                                    } else {
+                                        format!(r#"{{"detail":"{}"}}"#, detail.to_string().replace('"', "'"))
+                                    }
+                                } else {
+                                    format!(r#"{{"detail":"{}"}}"#, detail.to_string().replace('"', "'"))
+                                }
+                            } else {
+                                format!(r#"{{"detail":"{}"}}"#, bound_err.to_string().replace('"', "'"))
+                            };
+
+                            HyperResponse::builder()
+                                .status(status_code)
+                                .header("Content-Type", "application/json")
+                                .body(Body::from(detail_json))
+                                .unwrap()
+                        });
+                        dependency_error_response = Some(resp);
+                        break;
+                    }
+                    Err(_) => {
+                        dependency_error_response = Some(
+                            HyperResponse::builder()
+                                .status(500)
+                                .header("Content-Type", "application/json")
+                                .body(Body::from(r#"{"detail":"Asyncio task dropped"}"#))
+                                .unwrap()
+                        );
+                        break;
+                    }
                 }
             }
-            Err(e) => { dependency_error = Some(e); break; }
+            Err(py_err) => {
+                let resp = Python::with_gil(|py| -> HyperResponse<Body> {
+                    let err_val = py_err.into_value(py);
+                    let bound_err = err_val.bind(py);
+                    let status_code: u16 = bound_err.getattr("status_code")
+                        .and_then(|s| s.extract())
+                        .unwrap_or(500);
+
+                    let detail_json: String = if let Ok(detail) = bound_err.getattr("detail") {
+                        if let Ok(py_json) = py.import_bound("json") {
+                            if let Ok(dumps_res) = py_json.call_method1("dumps", (&detail,)) {
+                                let d_str: String = dumps_res.extract().unwrap_or_default();
+                                format!(r#"{{"detail":{}}}"#, d_str)
+                            } else {
+                                format!(r#"{{"detail":"{}"}}"#, detail.to_string().replace('"', "'"))
+                            }
+                        } else {
+                            format!(r#"{{"detail":"{}"}}"#, detail.to_string().replace('"', "'"))
+                        }
+                    } else {
+                        format!(r#"{{"detail":"{}"}}"#, bound_err.to_string().replace('"', "'"))
+                    };
+
+                    HyperResponse::builder()
+                        .status(status_code)
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(detail_json))
+                        .unwrap()
+                });
+                dependency_error_response = Some(resp);
+                break;
+            }
         }
     }
 
-    if let Some(err_msg) = dependency_error {
-        return Ok(
-            HyperResponse::builder().status(500)
-                .header("Content-Type", "application/json")
-                .body(Body::from(format!(r#"{{"detail":"{}"}}"#, err_msg.replace('"', "'"))))
-                .unwrap()
-        );
+    if let Some(err_resp) = dependency_error_response {
+        return Ok(err_resp);
     }
 
     // -- BackgroundTasks setup --------------------------------------------

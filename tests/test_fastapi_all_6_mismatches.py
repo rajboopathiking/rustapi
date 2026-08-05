@@ -111,3 +111,41 @@ def test_6_upload_file_sync_and_async_methods():
         await file_obj.close()
 
     asyncio.run(_test())
+
+
+def test_7_openapi_security_schemes_and_http_exception_status_codes():
+    app = FastAPI()
+    oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+    bearer_scheme = HTTPBearer()
+
+    @app.get("/secure/me")
+    def secure_me(token: str = Depends(oauth2_scheme)):
+        if not token:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        return {"status": "ok"}
+
+    @app.get("/admin/logs")
+    def admin_logs(token: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
+        return {"logs": []}
+
+    def run_server():
+        app.run(host="127.0.0.1", port=8994)
+
+    t = threading.Thread(target=run_server, daemon=True)
+    t.start()
+    time.sleep(1.5)
+
+    # 1. Test OpenAPI securitySchemes generation
+    res_openapi = requests.get("http://127.0.0.1:8994/openapi.json")
+    assert res_openapi.status_code == 200
+    openapi_doc = res_openapi.json()
+    assert "components" in openapi_doc
+    assert "securitySchemes" in openapi_doc["components"]
+    schemes = openapi_doc["components"]["securitySchemes"]
+    assert "OAuth2PasswordBearer" in schemes or "HTTPBearer" in schemes
+
+    # 2. Test HTTPException status code propagation (401 instead of 500)
+    res_unauth = requests.get("http://127.0.0.1:8994/secure/me")
+    assert res_unauth.status_code == 401
+    assert "Not authenticated" in res_unauth.json()["detail"] or "Unauthorized" in res_unauth.json()["detail"]
+
