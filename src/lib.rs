@@ -39,6 +39,7 @@ const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024;
 enum Segment {
     Literal(String),
     Param(String),
+    Wildcard(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -117,16 +118,34 @@ type NativeRoutes = Arc<StdMutex<Vec<NativeRouteEntry>>>;
 fn match_native_route(routes: &[NativeRouteEntry], method: &str, path: &str) -> Option<NativeRouteEntry> {
     let req_segs = path_segments(path);
     for r in routes.iter() {
-        if r.method != method || r.segments.len() != req_segs.len() {
+        if r.method != method {
+            continue;
+        }
+        let has_wildcard = r.segments.last().map(|s| matches!(s, Segment::Wildcard(_))).unwrap_or(false);
+        if !has_wildcard && r.segments.len() != req_segs.len() {
+            continue;
+        }
+        if has_wildcard && req_segs.len() < r.segments.len().saturating_sub(1) {
             continue;
         }
         let mut ok = true;
-        for (seg, val) in r.segments.iter().zip(req_segs.iter()) {
+        let seg_len = r.segments.len();
+        for (i, seg) in r.segments.iter().enumerate() {
+            if i == seg_len - 1 {
+                if let Segment::Wildcard(_) = seg {
+                    break;
+                }
+            }
+            if i >= req_segs.len() {
+                ok = false;
+                break;
+            }
             match seg {
                 Segment::Literal(l) => {
-                    if l != val { ok = false; break; }
+                    if l != req_segs[i] { ok = false; break; }
                 }
                 Segment::Param(_) => {}
+                Segment::Wildcard(_) => break,
             }
         }
         if ok { return Some(r.clone()); }
@@ -147,7 +166,17 @@ fn parse_pattern(path: &str) -> Vec<Segment> {
         .into_iter()
         .map(|s| {
             if s.starts_with('{') && s.ends_with('}') {
-                Segment::Param(s[1..s.len() - 1].to_string())
+                let inner = &s[1..s.len() - 1];
+                if inner.contains(":path") {
+                    let clean = inner.split(':').next().unwrap_or(inner).to_string();
+                    Segment::Wildcard(clean)
+                } else if inner.starts_with('*') {
+                    Segment::Wildcard(inner[1..].to_string())
+                } else {
+                    Segment::Param(inner.to_string())
+                }
+            } else if s.starts_with('*') {
+                Segment::Wildcard(s[1..].to_string())
             } else {
                 Segment::Literal(s.to_string())
             }
@@ -158,18 +187,45 @@ fn parse_pattern(path: &str) -> Vec<Segment> {
 fn match_route(routes: &[RouteEntry], method: &str, path: &str) -> Option<(usize, HashMap<String, String>)> {
     let req_segs = path_segments(path);
     for (idx, r) in routes.iter().enumerate() {
-        if r.method != method || r.segments.len() != req_segs.len() {
+        if r.method != method {
             continue;
         }
+        let has_wildcard = r.segments.last().map(|s| matches!(s, Segment::Wildcard(_))).unwrap_or(false);
+        if !has_wildcard && r.segments.len() != req_segs.len() {
+            continue;
+        }
+        if has_wildcard && req_segs.len() < r.segments.len().saturating_sub(1) {
+            continue;
+        }
+
         let mut params = HashMap::new();
         let mut ok = true;
-        for (seg, val) in r.segments.iter().zip(req_segs.iter()) {
+        let seg_len = r.segments.len();
+
+        for (i, seg) in r.segments.iter().enumerate() {
+            if i == seg_len - 1 {
+                if let Segment::Wildcard(name) = seg {
+                    let rest = if i < req_segs.len() { req_segs[i..].join("/") } else { String::new() };
+                    params.insert(name.clone(), rest);
+                    break;
+                }
+            }
+            if i >= req_segs.len() {
+                ok = false;
+                break;
+            }
+            let val = req_segs[i];
             match seg {
                 Segment::Literal(l) => {
                     if l != val { ok = false; break; }
                 }
                 Segment::Param(name) => {
                     params.insert(name.clone(), (*val).to_string());
+                }
+                Segment::Wildcard(name) => {
+                    let rest = req_segs[i..].join("/");
+                    params.insert(name.clone(), rest);
+                    break;
                 }
             }
         }
@@ -354,6 +410,24 @@ fn swagger_html() -> String {
       window.ui = SwaggerUIBundle({ url: '/openapi.json', dom_id: '#swagger-ui' });
     };
   </script>
+</body>
+</html>"#.to_string()
+}
+
+fn redoc_html() -> String {
+    r#"<!DOCTYPE html>
+<html>
+<head>
+<title>ReDoc</title>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet">
+<style>body { margin: 0; padding: 0; }</style>
+</head>
+<body>
+<noscript>ReDoc requires Javascript to function.</noscript>
+<redoc spec-url="/openapi.json"></redoc>
+<script src="https://cdn.jsdelivr.net/npm/redoc@2/bundles/redoc.standalone.js"> </script>
 </body>
 </html>"#.to_string()
 }
@@ -751,7 +825,7 @@ fn serialize_value(py: Python<'_>, obj: &PyObject, serializer: &PyObject, raw_st
 // Engine
 // ---------------------------------------------------------------------------
 
-#[pyclass]
+#[pyclass(name = "Engine", subclass)]
 struct Engine {
     routes: Routes,
     serializer: PyObject,
@@ -832,18 +906,18 @@ def _schema_from_signature(func):
     }
 
     // -- Route decorators --------------------------------------------------
-    #[pyo3(signature = (path, response_model=None))]
-    fn get    (&self, path: String, response_model: Option<Py<PyAny>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "GET".into(),    path, is_ws: false, response_model } }
-    #[pyo3(signature = (path, response_model=None))]
-    fn post   (&self, path: String, response_model: Option<Py<PyAny>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "POST".into(),   path, is_ws: false, response_model } }
-    #[pyo3(signature = (path, response_model=None))]
-    fn put    (&self, path: String, response_model: Option<Py<PyAny>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "PUT".into(),    path, is_ws: false, response_model } }
-    #[pyo3(signature = (path, response_model=None))]
-    fn delete (&self, path: String, response_model: Option<Py<PyAny>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "DELETE".into(), path, is_ws: false, response_model } }
-    #[pyo3(signature = (path, response_model=None))]
-    fn patch  (&self, path: String, response_model: Option<Py<PyAny>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "PATCH".into(),  path, is_ws: false, response_model } }
-    #[pyo3(signature = (path))]
-    fn websocket(&self, path: String) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "GET".into(), path, is_ws: true, response_model: None } }
+    #[pyo3(signature = (path, response_model=None, **_kwargs))]
+    fn get    (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "GET".into(),    path, is_ws: false, response_model } }
+    #[pyo3(signature = (path, response_model=None, **_kwargs))]
+    fn post   (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "POST".into(),   path, is_ws: false, response_model } }
+    #[pyo3(signature = (path, response_model=None, **_kwargs))]
+    fn put    (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "PUT".into(),    path, is_ws: false, response_model } }
+    #[pyo3(signature = (path, response_model=None, **_kwargs))]
+    fn delete (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "DELETE".into(), path, is_ws: false, response_model } }
+    #[pyo3(signature = (path, response_model=None, **_kwargs))]
+    fn patch  (&self, path: String, response_model: Option<Py<PyAny>>, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "PATCH".into(),  path, is_ws: false, response_model } }
+    #[pyo3(signature = (path, **_kwargs))]
+    fn websocket(&self, path: String, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { RouteDecorator { routes: self.routes.clone(), method: "GET".into(), path, is_ws: true, response_model: None } }
 
     #[pyo3(signature = (path, body, method="GET", status_code=200, content_type="application/json"))]
     fn add_native_route(&self, path: String, body: String, method: &str, status_code: u16, content_type: &str) {
@@ -912,8 +986,11 @@ def _schema_from_signature(func):
     }
 
     /// Mount a sub-router, supporting all HTTP methods.
-    #[pyo3(signature = (router, prefix = "".to_string()))]
-    fn include_router(&self, py: Python<'_>, router: Py<PyAny>, prefix: String) -> PyResult<()> {
+    #[pyo3(signature = (router, prefix = "".to_string(), **_kwargs))]
+    fn include_router(&self, py: Python<'_>, router: Py<PyAny>, prefix: String, _kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        let router_prefix: String = router.getattr(py, "prefix").and_then(|p| p.extract(py)).unwrap_or_default();
+        let base_prefix = format!("{}{}", prefix, router_prefix);
+
         for item_res in router.getattr(py, "routes")?.bind(py).iter()? {
             let item = item_res?;
             let len = item.len()?;
@@ -921,14 +998,15 @@ def _schema_from_signature(func):
             let path: String = item.get_item(1)?.extract()?;
             let func: Py<PyAny> = item.get_item(2)?.extract()?;
             let response_model: Option<Py<PyAny>> = if len > 3 { item.get_item(3)?.extract().ok() } else { None };
-            let full_path = format!("{}{}", prefix, path).replace("//", "/");
+            let raw_path = format!("{}{}", base_prefix, path).replace("//", "/");
+            let full_path = if raw_path.starts_with('/') { raw_path } else { format!("/{}", raw_path) };
             match method.as_str() {
-                "GET"    => { self.get(full_path, response_model).__call__(py, func)?; }
-                "POST"   => { self.post(full_path, response_model).__call__(py, func)?; }
-                "PUT"    => { self.put(full_path, response_model).__call__(py, func)?; }
-                "DELETE" => { self.delete(full_path, response_model).__call__(py, func)?; }
-                "PATCH"  => { self.patch(full_path, response_model).__call__(py, func)?; }
-                "WS"     => { self.websocket(full_path).__call__(py, func)?; }
+                "GET"    => { self.get(full_path, response_model, None).__call__(py, func)?; }
+                "POST"   => { self.post(full_path, response_model, None).__call__(py, func)?; }
+                "PUT"    => { self.put(full_path, response_model, None).__call__(py, func)?; }
+                "DELETE" => { self.delete(full_path, response_model, None).__call__(py, func)?; }
+                "PATCH"  => { self.patch(full_path, response_model, None).__call__(py, func)?; }
+                "WS"     => { self.websocket(full_path, None).__call__(py, func)?; }
                 other    => eprintln!("include_router: unsupported method '{}'", other),
             };
         }
@@ -1369,8 +1447,13 @@ async fn handle(
     // -----------------------------------------------------------------------
     let (status, resp_body, resp_headers) = if method == "GET" && path == "/docs" {
         let mut h = HashMap::new();
-        h.insert("Content-Type".to_string(), "text/html".to_string());
+        h.insert("Content-Type".to_string(), "text/html; charset=utf-8".to_string());
         (200u16, swagger_html(), h)
+
+    } else if method == "GET" && path == "/redoc" {
+        let mut h = HashMap::new();
+        h.insert("Content-Type".to_string(), "text/html; charset=utf-8".to_string());
+        (200u16, redoc_html(), h)
 
     } else if method == "GET" && path == "/openapi.json" {
         let spec = { let guard = routes.lock().unwrap(); generate_openapi(&guard) };

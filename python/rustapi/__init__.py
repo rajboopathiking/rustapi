@@ -29,8 +29,24 @@ from .param_functions import (
     Security,
 )
 
-# FastAPI Aliases for 100% compatibility
-FastAPI = Engine
+class FastAPI(Engine):
+    """FastAPI-compatible application class wrapping the Rust Tokio core engine."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    def frontend(self, path: str = "/", directory: str = "dist"):
+        """Serve a built static frontend app (e.g. Vite, React, Vue, Svelte output directory)."""
+        from .staticfiles import StaticFiles
+        handler = StaticFiles(directory=directory, html=True)
+        norm_path = path.rstrip("/")
+        wildcard_path = f"{norm_path}/{{file_path:path}}" if norm_path else "/{file_path:path}"
+        root_path = norm_path if norm_path else "/"
+
+        self.get(root_path)(lambda: handler(""))
+        self.get(wildcard_path)(lambda file_path="": handler(file_path))
+
+Engine = FastAPI
 Request = PyRequest
 
 try:

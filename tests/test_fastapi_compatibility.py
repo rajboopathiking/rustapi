@@ -163,3 +163,30 @@ def test_frontend_app_serving(tmp_path):
     assert res_spa.status_code == 200
     assert b"<h1>My App</h1>" in res_spa.content
 
+
+def test_app_and_router_advanced_fastapi_features(tmp_path):
+    app = FastAPI()
+
+    # 1. Route decorator with extra FastAPI kwargs
+    @app.get("/items", status_code=201, tags=["items"], summary="Get items", description="Returns items")
+    def get_items():
+        return {"items": [1, 2, 3]}
+
+    # 2. APIRouter with prefix & kwargs
+    router = rustapi.APIRouter(prefix="/users", tags=["users"], dependencies=[])
+
+    @router.get("/me", status_code=200, summary="Current user")
+    def get_me():
+        return {"user": "bob"}
+
+    app.include_router(router, prefix="/api/v1", tags=["api"])
+
+    # 3. app.frontend
+    dist_dir = tmp_path / "app_dist"
+    dist_dir.mkdir()
+    (dist_dir / "index.html").write_text("<h1>Root App</h1>")
+    app.frontend("/", directory=str(dist_dir))
+
+    assert app is not None
+
+
