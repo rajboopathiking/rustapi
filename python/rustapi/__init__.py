@@ -29,11 +29,19 @@ from .param_functions import (
     Security,
 )
 
+from .responses import FileResponse
+from . import responses, middleware
+
 class FastAPI(Engine):
     """FastAPI-compatible application class wrapping the Rust Tokio core engine."""
 
     def __init__(self, *args, **kwargs):
         super().__init__()
+        self.middlewares: list = []
+
+    def add_middleware(self, middleware_cls: type, **kwargs: Any):
+        """Add middleware (such as CORSMiddleware) to application configuration."""
+        self.middlewares.append((middleware_cls, kwargs))
 
     def frontend(self, path: str = "/", directory: str = "dist"):
         """Serve a built static frontend app (e.g. Vite, React, Vue, Svelte output directory)."""
@@ -128,6 +136,9 @@ __all__ = [
     "PlainTextResponse",
     "RedirectResponse",
     "StreamingResponse",
+    "FileResponse",
+    "responses",
+    "middleware",
     "EventSourceResponse",
     "ServerSentEvent",
     "format_sse_event",
