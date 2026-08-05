@@ -12,6 +12,8 @@ RustAPI (`pyrustapi`) provides **1:1 FastAPI compatibility**, enabling developer
 | **`Request` Alias** | `from rustapi import Request` | Class alias for `PyRequest`. |
 | **Status Codes** | `from rustapi import status` | Starlette/FastAPI status code constants (`status.HTTP_200_OK`, `status.HTTP_404_NOT_FOUND`, etc.). |
 | **OpenAPI & Docs UI** | `from rustapi.openapi import get_swagger_ui_html, get_redoc_html` | Interactive Swagger UI (`/docs`) and ReDoc (`/redoc`) HTML generators. |
+| **Response Classes** | `from rustapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse` | Full range of FastAPI response classes. |
+| **CORS Middleware** | `from rustapi.middleware.cors import CORSMiddleware` | Middleware class & `app.add_middleware()` for configuring cross-origin requests. |
 | **Server-Sent Events** | `from rustapi import EventSourceResponse, ServerSentEvent, format_sse_event` | Real-time SSE streaming for AI/LLM tokens and Model Context Protocol (MCP). |
 | **Data Encoders** | `from rustapi import jsonable_encoder` | Convert Pydantic models, Dataclasses, Datetime, UUID, and dicts to JSON-serializable primitives. |
 | **Parameter Markers** | `from rustapi import Body, Query, Path, Header, Cookie, Form, File, Security` | Location markers for dependency injection and parameter validation. |
