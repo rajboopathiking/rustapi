@@ -506,8 +506,53 @@ struct PyUploadFile {
 
 #[pymethods]
 impl PyUploadFile {
-    fn read(&self, py: Python<'_>) -> PyObject {
-        PyBytes::new_bound(py, &self.file_data).into()
+    #[new]
+    #[pyo3(signature = (filename="".to_string(), content_type="".to_string(), file_data=Vec::new()))]
+    fn new(filename: String, content_type: String, file_data: Vec<u8>) -> Self {
+        PyUploadFile { filename, content_type, file_data }
+    }
+
+    #[pyo3(signature = (_size=-1))]
+    fn read(&self, py: Python<'_>, _size: i64) -> PyResult<PyObject> {
+        let bytes_obj = PyBytes::new_bound(py, &self.file_data);
+        if let Ok(py_module) = py.import_bound("rustapi.uploads") {
+            if let Ok(awaitable_cls) = py_module.getattr("AwaitableBytes") {
+                if let Ok(res) = awaitable_cls.call1((&bytes_obj,)) {
+                    return Ok(res.unbind());
+                }
+            }
+        }
+        Ok(bytes_obj.into())
+    }
+
+    #[pyo3(signature = (_offset=0))]
+    fn seek(&self, py: Python<'_>, _offset: i64) -> PyResult<PyObject> {
+        if let Ok(py_module) = py.import_bound("rustapi.uploads") {
+            if let Ok(awaitable_cls) = py_module.getattr("AwaitableInt") {
+                if let Ok(res) = awaitable_cls.call1((0,)) {
+                    return Ok(res.unbind());
+                }
+            }
+        }
+        Ok(0.to_object(py))
+    }
+
+    fn close(&self, py: Python<'_>) -> PyResult<PyObject> {
+        if let Ok(py_module) = py.import_bound("rustapi.uploads") {
+            if let Ok(awaitable_cls) = py_module.getattr("AwaitableNone") {
+                if let Ok(res) = awaitable_cls.call0() {
+                    return Ok(res.unbind());
+                }
+            }
+        }
+        Ok(py.None())
+    }
+
+    #[getter]
+    fn file(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let io = py.import_bound("io")?;
+        let bytes_obj = PyBytes::new_bound(py, &self.file_data);
+        io.call_method1("BytesIO", (bytes_obj,)).map(|b| b.unbind())
     }
 }
 

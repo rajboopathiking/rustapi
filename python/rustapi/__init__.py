@@ -35,13 +35,41 @@ from . import responses, middleware
 class FastAPI(Engine):
     """FastAPI-compatible application class wrapping the Rust Tokio core engine."""
 
-    def __init__(self, *args, **kwargs):
+    def __new__(cls, *args, **kwargs):
+        return super().__new__(cls)
+
+    def __init__(
+        self,
+        title: str = "RustAPI",
+        description: str = "",
+        version: str = "0.1.0",
+        openapi_url: Optional[str] = "/openapi.json",
+        docs_url: Optional[str] = "/docs",
+        redoc_url: Optional[str] = "/redoc",
+        swagger_ui_oauth2_redirect_url: Optional[str] = "/docs/oauth2-redirect",
+        **kwargs: Any,
+    ):
         super().__init__()
+        self.title = title
+        self.description = description
+        self.version = version
+        self.openapi_url = openapi_url
+        self.docs_url = docs_url
+        self.redoc_url = redoc_url
+        self.swagger_ui_oauth2_redirect_url = swagger_ui_oauth2_redirect_url
+        self.exception_handlers: Dict[Any, Any] = {}
         self.middlewares: list = []
 
     def add_middleware(self, middleware_cls: type, **kwargs: Any):
         """Add middleware (such as CORSMiddleware) to application configuration."""
         self.middlewares.append((middleware_cls, kwargs))
+
+    def exception_handler(self, exc_class_or_status_code: Any):
+        """Register an exception handler decorator for an exception class or status code."""
+        def decorator(func: Any):
+            self.exception_handlers[exc_class_or_status_code] = func
+            return func
+        return decorator
 
     def frontend(self, path: str = "/", directory: str = "dist"):
         """Serve a built static frontend app (e.g. Vite, React, Vue, Svelte output directory)."""
@@ -124,7 +152,7 @@ class RedirectResponse(Response):
         return Response.__new__(cls, content="", status_code=status_code, headers=h)
 
 
-__version__ = "0.3.33"
+__version__ = "0.3.34"
 __all__ = [
     "Engine",
     "FastAPI",
