@@ -1,6 +1,6 @@
 [package]
 name = "rustapi"
-version = "0.1.33"
+version = "0.1"
 edition = "2021"
 description = "A FastAPI-style Python web framework with a Rust tokio/hyper core, plus a built-in MCP server (JSON-RPC over Streamable HTTP)."
 license = "MIT"
