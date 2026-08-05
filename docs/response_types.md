@@ -55,3 +55,20 @@ def login_handler(req):
     
     return {"user": username, "user_agent": req.headers.get("user-agent")}
 ```
+
+---
+
+## 💡 FastAPI `Request` vs RustAPI `req` (`PyRequest`) Mapping
+
+| Feature / Attribute | FastAPI (`starlette.requests.Request`) | RustAPI (`req` / `PyRequest`) |
+| :--- | :--- | :--- |
+| **HTTP Method** | `request.method` | `req.method` |
+| **Request Path** | `request.url.path` | `req.path` |
+| **Path Params** | `request.path_params` | `req.path_params` |
+| **Query Params** | `request.query_params` | `req.query_params` |
+| **Headers** | `request.headers` | `req.headers` |
+| **Cookies** | `request.cookies` | `req.cookies` |
+| **Form Data** | `await request.form()` | `req.form` (Synchronous dictionary) |
+| **Uploaded Files** | `await request.form()` | `req.files` (Dict of `UploadFile` objects) |
+| **Body String** | `await request.body()` | `req.body` (Synchronous string) |
+| **JSON Parsing** | `await request.json()` | `req.json()` (Synchronous method, no `await`) |
