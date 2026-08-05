@@ -9,17 +9,50 @@ RustAPI provides a FastAPI-compatible surface backed by a high-performance Tokio
 Handlers can be synchronous `def` or asynchronous `async def`. Sync handlers are executed safely inside Tokio's thread-pool without blocking incoming requests.
 
 ```python
-from rustapi import Engine
+from rustapi import FastAPI, Request, status
 
-app = Engine()
+app = FastAPI()
 
-@app.get("/")
-def sync_root():
-    return {"message": "Sync handler routed by Rust"}
+@app.get("/", status_code=status.HTTP_200_OK)
+def sync_root(request: Request):
+    return {"message": "Sync handler routed by Rust Tokio core"}
 
 @app.get("/async")
 async def async_root():
-    return {"message": "Async handler routed by Rust"}
+    return {"message": "Async handler routed by Rust Tokio core"}
+```
+
+---
+
+## 🌐 Serving Frontend Apps (`app.frontend`)
+
+Serve built static Single-Page Applications (Vite, React, Vue, Svelte) with automatic client-side routing fallback:
+
+```python
+from rustapi import FastAPI
+
+app = FastAPI()
+
+# Serves 'dist/index.html' for root and static assets from 'dist/'
+app.frontend("/", directory="dist")
+```
+
+---
+
+## 🤖 Real-Time AI / LLM Streaming (Server-Sent Events)
+
+Stream AI tokens or MCP events over HTTP using `EventSourceResponse`:
+
+```python
+from rustapi import FastAPI, EventSourceResponse, ServerSentEvent
+
+app = FastAPI()
+
+@app.get("/ai-stream", response_class=EventSourceResponse)
+async def stream_ai_tokens():
+    tokens = ["Hello", " world", " from", " RustAPI!"]
+    for token in tokens:
+        yield ServerSentEvent(data={"token": token}, event="message")
 ```
 
 ---
@@ -57,11 +90,16 @@ def db_items():
 
 ## 🔍 Path & Query Parameters
 
-Parameters are automatically coerced into `int`, `float`, `bool`, or `str` based on Python type hints:
+Parameters are automatically coerced into `int`, `float`, `bool`, or `str` based on Python type hints or `Path(...)` / `Query(...)` markers:
 
 ```python
+from rustapi import Path, Query
+
 @app.get("/items/{item_id}")
-def read_item(item_id: int, q: str = "default"):
+def read_item(
+    item_id: int = Path(..., ge=1),
+    q: str = Query("default", max_length=50),
+):
     return {"item_id": item_id, "query": q}
 ```
 
@@ -75,7 +113,7 @@ Request payloads are validated using Pydantic models. Return values can be filte
 
 ```python
 from pydantic import BaseModel
-from rustapi import Engine
+from rustapi import FastAPI
 
 class UserCreate(BaseModel):
     username: str
@@ -102,9 +140,9 @@ def create_user(user: UserCreate):
 FastAPI-style `Depends` with request-scoped caching is supported out of the box:
 
 ```python
-from rustapi import Engine, Depends
+from rustapi import FastAPI, Depends
 
-app = Engine()
+app = FastAPI()
 
 def get_db():
     return {"db": "production_sqlite"}
@@ -119,8 +157,10 @@ app.dependency_overrides[get_db] = lambda: {"db": "test_sqlite"}
 
 ---
 
-## 📖 OpenAPI & Swagger UI
+## 📖 Interactive OpenAPI, Swagger UI & ReDoc
 
-Interactive OpenAPI documentation is generated automatically:
-* **OpenAPI JSON**: `GET /openapi.json`
+Interactive documentation pages are generated and served automatically:
+* **OpenAPI JSON Spec**: `GET /openapi.json`
 * **Swagger UI**: `GET /docs`
+* **ReDoc Interactive UI**: `GET /redoc`
+
