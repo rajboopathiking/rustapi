@@ -164,7 +164,7 @@
       <span class="eyebrow">Response Classes</span>
       <h2>📤 Custom Response Types</h2>
 
-      <pre><code><span class="kw">from</span> rustapi <span class="kw">import</span> HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+      <pre><code><span class="kw">from</span> rustapi <span class="kw">import</span> HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse, EventSourceResponse
 
 <span class="dec">@app.get</span>(<span class="str">"/html"</span>)
 <span class="kw">def</span> get_html():
@@ -191,7 +191,7 @@ app.dependency_overrides[get_db] = <span class="kw">lambda</span>: <span class="
     </section>
 
     <footer>
-      <p>RustAPI v0.1.31 — Built with Tokio, Hyper, PyO3, and sqlx. MIT Licensed.</p>
+      <p>RustAPI v0.3.3 — Built with Tokio, Hyper, PyO3, and sqlx. MIT Licensed.</p>
     </footer>
 
   </main>
