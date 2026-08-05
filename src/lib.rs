@@ -1538,7 +1538,19 @@ async fn handle(
     // -----------------------------------------------------------------------
     // Internal built-in routes & route matching
     // -----------------------------------------------------------------------
-    let (status, resp_body, resp_headers) = if method == "GET" && path == "/docs" {
+
+    if method == "OPTIONS" {
+        let mut h = HashMap::new();
+        h.insert("Access-Control-Allow-Origin".to_string(), "*".to_string());
+        h.insert("Access-Control-Allow-Methods".to_string(), "GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD".to_string());
+        h.insert("Access-Control-Allow-Headers".to_string(), "*".to_string());
+        h.insert("Access-Control-Allow-Credentials".to_string(), "true".to_string());
+        let mut builder = HyperResponse::builder().status(200);
+        for (k, v) in h { builder = builder.header(&k, &v); }
+        return Ok(builder.body(Body::empty()).unwrap());
+    }
+
+    let (status, resp_body, mut resp_headers) = if method == "GET" && path == "/docs" {
         let mut h = HashMap::new();
         h.insert("Content-Type".to_string(), "text/html; charset=utf-8".to_string());
         (200u16, swagger_html(), h)
@@ -1589,6 +1601,10 @@ async fn handle(
             }
         }
     };
+
+    resp_headers.entry("Access-Control-Allow-Origin".to_string()).or_insert("*".to_string());
+    resp_headers.entry("Access-Control-Allow-Methods".to_string()).or_insert("GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD".to_string());
+    resp_headers.entry("Access-Control-Allow-Headers".to_string()).or_insert("*".to_string());
 
     let mut builder = HyperResponse::builder().status(status);
     for (k, v) in resp_headers { builder = builder.header(&k, &v); }
