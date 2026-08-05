@@ -219,7 +219,7 @@ async def analyze(req: Request):
 
 ---
 
-## 9. Full Python Ecosystem Interoperability & Release v0.8.6
+## 9. Full Python Ecosystem Interoperability & Release v1.8.6
 
 `pyrustapi` features zero-limitation compatibility with the Python library ecosystem:
 
@@ -241,10 +241,65 @@ async def analyze(req: Request):
 - **Scientific & ML Accelerators** (`torch`, `cuda`, `scikit-learn`, `numba`, `scipy`): GPU tensor execution & JIT function evaluation operate seamlessly.
 - **Domain-Specific Packages** (`biopython`, `rdkit`, `astropy`, `cv2`, `librosa`): Native binary dependencies load and execute without modification.
 
-### Key Improvements in Release v0.8.6:
+### Authentication & Authorization Code Pattern (v1.8.6)
 
-1. **Native OpenAPI `securitySchemes` & Swagger UI "Authorize 🔓"**:
-   Automatically detects `HTTPBearer`, `OAuth2PasswordBearer(tokenUrl=...)`, `APIKeyHeader`, `APIKeyQuery`, and `HTTPBasic` dependencies to output `components.securitySchemes` in `/openapi.json`, activating interactive auth testing in Swagger UI (`/docs`).
+```python
+import jwt
+from rustapi import FastAPI, Request, Depends, HTTPException, status
+from rustapi.security import (
+    HTTPBearer,
+    HTTPAuthorizationCredentials,
+    OAuth2PasswordBearer,
+    APIKeyHeader,
+)
+from rustapi.resolver import solve_dependency
+
+app = FastAPI(title="Production Auth API", version="1.8.6")
+
+SECRET_KEY = "your-256-bit-secret-key"
+ALGORITHM = "HS256"
+
+# Security scheme declarations
+bearer_scheme = HTTPBearer()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
+api_key_scheme = APIKeyHeader(name="X-API-Key")
+
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization token required",
+        )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return {"username": payload["sub"], "role": payload["role"]}
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
+
+async def get_admin_user(current_user: dict = Depends(get_current_user)) -> dict:
+    if current_user["role"] not in ("admin", "sysadmin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required",
+        )
+    return current_user
+
+@app.get("/users/me")
+async def read_current_user(user: dict = Depends(get_current_user)):
+    return {"user": user["username"], "role": user["role"]}
+
+@app.get("/admin/audit-logs")
+async def read_audit_logs(admin: dict = Depends(get_admin_user)):
+    return {"logs": [], "accessed_by": admin["username"]}
+```
+
+### Key Improvements in Release v1.8.6:
+
+1. **Recursive Sub-Dependency OpenAPI SecuritySchemes**:
+   Automatically unrolls nested dependencies (`Depends(get_admin_user)` $\rightarrow$ `Depends(get_current_user)` $\rightarrow$ `Depends(oauth2_scheme)`) to output `components.securitySchemes` in `/openapi.json`, enabling interactive auth testing in Swagger UI (`/docs`).
 2. **HTTPException Status Code Preservation**:
    Directly propagates custom status codes (`401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `422 Unprocessable Entity`) without falling back to 500 Internal Server Errors.
 3. **Recursive Dependency & Request Injection**:

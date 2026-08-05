@@ -65,13 +65,24 @@ class FastAPI(Engine):
         self.middlewares.append((middleware_cls, kwargs))
 
     async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any):
-        """ASGI 3.0 interface implementation for ASGITransport, TestClient, and uvicorn."""
+        """ASGI 3.0 interface implementation for ASGITransport, TestClient, uvicorn, and pytest."""
+        import inspect, json
         if scope["type"] == "lifespan":
             while True:
                 message = await receive()
                 if message["type"] == "lifespan.startup":
+                    for handler in getattr(self, "startup_handlers", []):
+                        if inspect.iscoroutinefunction(handler):
+                            await handler()
+                        else:
+                            handler()
                     await send({"type": "lifespan.startup.complete"})
                 elif message["type"] == "lifespan.shutdown":
+                    for handler in getattr(self, "shutdown_handlers", []):
+                        if inspect.iscoroutinefunction(handler):
+                            await handler()
+                        else:
+                            handler()
                     await send({"type": "lifespan.shutdown.complete"})
                     break
             return
@@ -94,36 +105,35 @@ class FastAPI(Engine):
 
         body_str = body_bytes.decode("utf-8", errors="replace")
 
-        # Parse query params
-        from urllib.parse import parse_qs
-        query_params = {k: v[0] for k, v in parse_qs(query_string).items() if v}
+        try:
+            status_code, response_body, resp_headers = await self.dispatch_request(
+                method, path, query_string, headers, body_str
+            )
+        except Exception as exc:
+            import logging
+            logging.getLogger("rustapi").error(f"Error handling ASGI request [{method} {path}]: {exc}", exc_info=True)
+            handler = self.exception_handlers.get(type(exc)) or self.exception_handlers.get(getattr(exc, "status_code", None))
+            if handler:
+                req = PyRequest(method=method, path=path, path_params={}, query_params={}, headers=headers, cookies={}, form={}, files={}, body=body_str)
+                resp = await handler(req, exc) if inspect.iscoroutinefunction(handler) else handler(req, exc)
+                status_code = getattr(resp, "status_code", 500)
+                response_body = getattr(resp, "content", str(exc))
+                resp_headers = getattr(resp, "headers", {"content-type": "application/json"})
+            else:
+                status_code = getattr(exc, "status_code", 500)
+                detail = getattr(exc, "detail", str(exc))
+                response_body = f'{{"detail": "{detail}"}}' if isinstance(detail, str) else json.dumps({"detail": detail})
+                resp_headers = {"content-type": "application/json"}
 
-        # Build PyRequest
-        req = PyRequest(
-            method=method,
-            path=path,
-            query_params=query_params,
-            headers=headers,
-            cookies={},
-            form={},
-            files={},
-            body=body_str,
-        )
-
-        # Match route
-        matched = None
-        for item in getattr(self, "routes", []):
-            pass
-
-        # Send response start
+        encoded_headers = [(k.encode("latin1"), v.encode("latin1")) for k, v in resp_headers.items()]
         await send({
             "type": "http.response.start",
-            "status": 200,
-            "headers": [(b"content-type", b"application/json")],
+            "status": status_code,
+            "headers": encoded_headers,
         })
         await send({
             "type": "http.response.body",
-            "body": b'{"status": "ok"}',
+            "body": response_body.encode("utf-8") if isinstance(response_body, str) else response_body,
         })
 
     def exception_handler(self, exc_class_or_status_code: Any):
@@ -214,7 +224,7 @@ class RedirectResponse(Response):
         return Response.__new__(cls, content="", status_code=status_code, headers=h)
 
 
-__version__ = "0.8.6"
+__version__ = "1.8.6"
 __all__ = [
     "Engine",
     "FastAPI",
