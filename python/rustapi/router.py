@@ -45,6 +45,35 @@ class APIRouter:
             return func
         return decorator
 
+    def include_router(
+        self,
+        router: APIRouter,
+        prefix: str = "",
+        tags: Optional[List[str]] = None,
+        dependencies: Optional[List[Any]] = None,
+        **kwargs: Any,
+    ):
+        """Include a sub-router into this APIRouter instance."""
+        base_prefix = f"{prefix.rstrip('/')}{router.prefix}"
+        merged_tags = list(dict.fromkeys((tags or []) + (router.tags or [])))
+        merged_deps = (dependencies or []) + (router.dependencies or [])
+
+        for item in router.routes:
+            method, sub_path, func, response_model, route_kwargs = item
+            full_path = f"{base_prefix}{sub_path}".replace("//", "/")
+            if not full_path.startswith("/"):
+                full_path = f"/{full_path}"
+
+            r_kw = route_kwargs.copy() if route_kwargs else {}
+            r_tags = list(dict.fromkeys(merged_tags + r_kw.get("tags", [])))
+            r_deps = merged_deps + r_kw.get("dependencies", [])
+            if r_tags:
+                r_kw["tags"] = r_tags
+            if r_deps:
+                r_kw["dependencies"] = r_deps
+
+            self.routes.append((method, full_path, func, response_model, r_kw))
+
     def get(self, path: str, response_model: Optional[Type[Any]] = None, **kwargs: Any):
         return self._add("GET", path, response_model=response_model, **kwargs)
 
