@@ -168,4 +168,72 @@ def get_item(
     # Convert dataclass/Pydantic model to JSON dict
     user_dict = jsonable_encoder(user)
     return {"item_id": item_id, "query": q, "user": user_dict}
+
+
+---
+
+## 7. Python Ecosystem Compatibility Matrix
+
+`rustapi` is built to seamlessly integrate with standard Python database, machine learning, security, and utility libraries:
+
+| Library Domain | Package | Verified Feature & Usage | Status |
+| :--- | :--- | :--- | :--- |
+| **Data Validation** | `pydantic` v2 | `BaseModel`, `Field`, `validator`, `EmailStr` in route bodies | ✅ Verified |
+| **HTTP Clients** | `httpx`, `requests` | `httpx.AsyncClient` & `requests` testing, multi-part uploads & streams | ✅ Verified |
+| **Databases & ORMs** | `sqlite3`, `sqlalchemy` | Session context managers & query execution inside `Depends(get_db)` | ✅ Verified |
+| **Image Processing** | `PIL` / `Pillow` | Image decoding & matrix transformations on `UploadFile` streams | ✅ Verified |
+| **JWT & Security** | `pyjwt`, `passlib`, `argon2` | `jwt.encode`, `jwt.decode`, password hashing inside auth endpoints | ✅ Verified |
+| **Numeric & ML** | `numpy` | `np.array` operations on request payloads & image byte arrays | ✅ Verified |
+
+```python
+import io
+import jwt
+import numpy as np
+from PIL import Image
+from pydantic import BaseModel, Field
+from rustapi import FastAPI, Request, Depends, HTTPException
+from rustapi.uploads import UploadFile
+
+app = FastAPI()
+
+class AnalysisModel(BaseModel):
+    project_name: str = Field(..., min_length=2)
+
+@app.post("/analyze")
+async def analyze(req: Request):
+    if "photo" not in req.files:
+        raise HTTPException(status_code=400, detail="No photo uploaded")
+    
+    file_obj: UploadFile = req.files["photo"][0]
+    img_bytes = await file_obj.read()  # Both await file.read() and file.read() work
+    
+    # Process image with Pillow & NumPy
+    image = Image.open(io.BytesIO(img_bytes)).convert("L")
+    array = np.array(image)
+    brightness = float(np.mean(array))
+    
+    # Encode JWT response
+    token = jwt.encode({"brightness": brightness}, "secret", algorithm="HS256")
+    return {"status": "success", "token": token}
+```
+
+---
+
+## 8. FastAPI Migration Mismatch Resolution (v0.3.34)
+
+The following 6 FastAPI compatibility enhancements have been resolved natively in `pyrustapi` v0.3.34:
+
+1. **Sub-Router Nesting (`APIRouter.include_router`)**:
+   `router.include_router(sub_router, prefix="/v1", tags=["sub"])` allows sub-routers to mount additional sub-routers with inherited path prefixes and tags.
+2. **`FastAPI` Constructor Kwargs**:
+   `FastAPI(title="My API", description="...", version="1.0.0", openapi_url="/openapi.json", docs_url="/docs", redoc_url="/redoc")` accepts all standard metadata keyword arguments without constructor errors.
+3. **Custom Exception Handlers (`@app.exception_handler`)**:
+   Register custom status code or exception class handlers via `@app.exception_handler(CustomException)`.
+4. **`HTTPBearer()` Credentials Container**:
+   `security = HTTPBearer()` returns `HTTPAuthorizationCredentials(scheme="Bearer", credentials="...")` when passed to `Depends(security)`.
+5. **Recursive Dependency Injection (`solve_dependency`)**:
+   Injects `request: Request` / `req` parameters automatically and recursively resolves nested `Depends(sub_dep)` calls.
+6. **Dual Async / Sync `UploadFile` Methods**:
+   `UploadFile` methods (`file.read()`, `file.seek()`, `file.close()`) support both asynchronous (`await file.read()`) and synchronous (`file.read()`) execution, plus `.file` returns `io.BytesIO`.
+
 ```
