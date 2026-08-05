@@ -39,3 +39,15 @@ class APIRouter:
 
     def websocket(self, path: str):
         return self._add("WS", path)
+
+    def frontend(self, path: str = "/", directory: str = "dist"):
+        """Serve a built static frontend app (e.g. Vite, React, Vue, Svelte output directory)."""
+        from .staticfiles import StaticFiles
+        handler = StaticFiles(directory=directory, html=True)
+        norm_path = path.rstrip("/")
+        wildcard_path = f"{norm_path}/{{file_path:path}}" if norm_path else "/{file_path:path}"
+        root_path = norm_path if norm_path else "/"
+
+        self.get(root_path)(lambda: handler(""))
+        self.get(wildcard_path)(lambda file_path="": handler(file_path))
+

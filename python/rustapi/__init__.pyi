@@ -216,3 +216,64 @@ def decode_jwt(token: str, secret: str, algorithm: Optional[str] = None) -> Dict
 def hash_password(password: str) -> str: ...
 def verify_password(password: str, hash: str) -> bool: ...
 def render_template(template_str: str, context: Dict[str, Any]) -> str: ...
+
+# ---- FastAPI Compatibility Aliases & Types ----
+FastAPI = Engine
+Request = PyRequest
+
+from http import HTTPStatus as status
+
+class WebSocketException(Exception):
+    code: int
+    reason: str
+    def __init__(self, code: int, reason: Optional[str] = None) -> None: ...
+
+class WebSocketDisconnect(Exception):
+    code: int
+    reason: str
+    def __init__(self, code: int = 1000, reason: Optional[str] = None) -> None: ...
+
+class EventSourceResponse(StreamingResponse):
+    media_type: str = "text/event-stream"
+
+class ServerSentEvent:
+    data: Optional[Any]
+    raw_data: Optional[str]
+    event: Optional[str]
+    id: Optional[str]
+    retry: Optional[int]
+    comment: Optional[str]
+    def __init__(
+        self,
+        data: Optional[Any] = None,
+        raw_data: Optional[str] = None,
+        event: Optional[str] = None,
+        id: Optional[str] = None,
+        retry: Optional[int] = None,
+        comment: Optional[str] = None,
+    ) -> None: ...
+
+def format_sse_event(
+    *,
+    data_str: Optional[str] = None,
+    event: Optional[str] = None,
+    id: Optional[str] = None,
+    retry: Optional[int] = None,
+    comment: Optional[str] = None,
+) -> bytes: ...
+
+def jsonable_encoder(obj: Any, **kwargs: Any) -> Any: ...
+
+class Param:
+    default: Any
+    def __init__(self, default: Any = ..., **kwargs: Any) -> None: ...
+
+def Path(default: Any = ..., **kwargs: Any) -> Param: ...
+def Query(default: Any = ..., **kwargs: Any) -> Param: ...
+def Body(default: Any = ..., **kwargs: Any) -> Param: ...
+def Header(default: Any = ..., **kwargs: Any) -> Param: ...
+def Cookie(default: Any = ..., **kwargs: Any) -> Param: ...
+def Form(default: Any = ..., **kwargs: Any) -> Param: ...
+def File(default: Any = ..., **kwargs: Any) -> Param: ...
+def Security(dependency: Any = None, *, use_cache: bool = True, scopes: Optional[List[str]] = None) -> Depends: ...
+

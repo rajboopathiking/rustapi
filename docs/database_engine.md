@@ -28,7 +28,23 @@ Use `db.execute()` to run schema migrations, insertions, updates, and deletions:
 
 ```python
 db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)")
-rows_affected = db.execute("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')")
+
+# Parameterized Queries (SQLite uses ?1, ?2 | Postgres uses $1, $2)
+rows_affected = db.execute("INSERT INTO users (name, email) VALUES (?1, ?2)", ["Alice", "alice@example.com"])
+```
+
+---
+
+## 🔍 Single & Multi Record Lookups (`db.fetch_one`, `db.fetch_all`)
+
+Retrieve Python dictionaries or lists directly from database queries:
+
+```python
+# 1. Fetch Single Record (returns dict or None)
+user = db.fetch_one("SELECT * FROM users WHERE id = ?1", [1])
+
+# 2. Fetch Multiple Records (returns list of dicts)
+users_list = db.fetch_all("SELECT * FROM users WHERE name = ?1", ["Alice"])
 ```
 
 ---

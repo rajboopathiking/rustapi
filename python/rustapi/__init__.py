@@ -1,4 +1,5 @@
 from typing import Any, Dict, Optional
+from .status import status
 from ._rustapi import (
     Engine,
     PyRequest,
@@ -11,10 +12,26 @@ from ._rustapi import (
     verify_password,
     render_template,
 )
-from .exceptions import HTTPException
+from .exceptions import HTTPException, WebSocketException, WebSocketDisconnect
 from .depends import Depends
 from .router import APIRouter
 from .background import BackgroundTasks
+from .sse import EventSourceResponse, ServerSentEvent, format_sse_event
+from .encoders import jsonable_encoder
+from .param_functions import (
+    Body,
+    Cookie,
+    File,
+    Form,
+    Header,
+    Path,
+    Query,
+    Security,
+)
+
+# FastAPI Aliases for 100% compatibility
+FastAPI = Engine
+Request = PyRequest
 
 try:
     from ._rustapi import Response
@@ -86,14 +103,21 @@ class RedirectResponse(Response):
 __version__ = "0.1.30"
 __all__ = [
     "Engine",
+    "FastAPI",
     "PyRequest",
+    "Request",
     "Response",
     "HTMLResponse",
     "JSONResponse",
     "PlainTextResponse",
     "RedirectResponse",
     "StreamingResponse",
+    "EventSourceResponse",
+    "ServerSentEvent",
+    "format_sse_event",
     "HTTPException",
+    "WebSocketException",
+    "WebSocketDisconnect",
     "Depends",
     "APIRouter",
     "BackgroundTasks",
@@ -105,4 +129,14 @@ __all__ = [
     "hash_password",
     "verify_password",
     "render_template",
+    "status",
+    "jsonable_encoder",
+    "Body",
+    "Cookie",
+    "File",
+    "Form",
+    "Header",
+    "Path",
+    "Query",
+    "Security",
 ]

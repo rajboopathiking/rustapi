@@ -21,3 +21,6 @@ build/
 .vscode/
 .idea/
 *.log
+
+# Local docs & references
+fastapi_docs/
