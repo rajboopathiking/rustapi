@@ -673,15 +673,23 @@ impl PyRequest {
     #[pyo3(signature = ())]
     fn json(&self, py: Python<'_>) -> PyResult<PyObject> {
         let trimmed = self.body.trim();
-        if trimmed.is_empty() {
-            let dict = pyo3::types::PyDict::new_bound(py);
-            return Ok(dict.unbind().into());
+        let raw_obj = if trimmed.is_empty() {
+            pyo3::types::PyDict::new_bound(py).into_any().unbind()
+        } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&self.body) {
+            serde_to_pyobject(py, &val)?
+        } else {
+            let py_json = py.import_bound("json")?;
+            py_json.call_method1("loads", (&self.body,)).map(|b| b.unbind())?
+        };
+
+        if let Ok(uploads_mod) = py.import_bound("rustapi.uploads") {
+            if let Ok(cls) = uploads_mod.getattr("AwaitableDict") {
+                if let Ok(awaitable_dict) = cls.call1((raw_obj.bind(py),)) {
+                    return Ok(awaitable_dict.unbind().into());
+                }
+            }
         }
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&self.body) {
-            return serde_to_pyobject(py, &val);
-        }
-        let py_json = py.import_bound("json")?;
-        py_json.call_method1("loads", (&self.body,)).map(|b| b.unbind())
+        Ok(raw_obj)
     }
 }
 

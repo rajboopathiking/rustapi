@@ -2,6 +2,14 @@ import io
 from typing import Optional, Dict, Any
 
 
+class AwaitableDict(dict):
+    """Dict subclass that is directly awaitable for async compatibility (await req.json())."""
+    def __await__(self):
+        async def _wrap():
+            return self
+        return _wrap().__await__()
+
+
 class AwaitableBytes(bytes):
     """Bytes subclass that is directly awaitable for async compatibility (await file.read())."""
     def __await__(self):
