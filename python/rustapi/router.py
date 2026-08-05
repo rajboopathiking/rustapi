@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any, Callable, Dict, List, Optional, Type
 
 
 class APIRouter:
@@ -8,37 +9,59 @@ class APIRouter:
 
         app.include_router(router, prefix="/api/v1")
 
-    All five HTTP verbs and WebSocket routes are supported.
+    All HTTP verbs, WebSockets, and frontend SPA serving are supported.
     """
 
-    def __init__(self, prefix: str = "", tags: list | None = None):
-        self.routes: list[tuple[str, str, object]] = []
-        self.prefix = prefix
+    def __init__(
+        self,
+        prefix: str = "",
+        tags: Optional[List[str]] = None,
+        dependencies: Optional[List[Any]] = None,
+        default_response_class: Optional[Type[Any]] = None,
+        responses: Optional[Dict[Any, Any]] = None,
+        callbacks: Optional[List[Any]] = None,
+        routes: Optional[List[Any]] = None,
+        redirect_slashes: bool = True,
+        default: Optional[Callable[..., Any]] = None,
+        dependency_overrides_provider: Optional[Any] = None,
+        route_class: Optional[Type[Any]] = None,
+        on_startup: Optional[List[Callable[..., Any]]] = None,
+        on_shutdown: Optional[List[Callable[..., Any]]] = None,
+        lifespan: Optional[Callable[..., Any]] = None,
+        deprecated: Optional[bool] = None,
+        include_in_schema: bool = True,
+        **extra: Any,
+    ):
+        self.routes: List[tuple] = routes or []
+        self.prefix = prefix.rstrip("/")
         self.tags = tags or []
+        self.dependencies = dependencies or []
+        self.responses = responses or {}
+        self.extra = extra
 
-    def _add(self, method: str, path: str, response_model: type | None = None):
-        def decorator(func):
-            self.routes.append((method, path, func, response_model))
+    def _add(self, method: str, path: str, response_model: Optional[Type[Any]] = None, **kwargs: Any):
+        def decorator(func: Callable[..., Any]):
+            self.routes.append((method, path, func, response_model, kwargs))
             return func
         return decorator
 
-    def get(self, path: str, response_model: type | None = None):
-        return self._add("GET", path, response_model=response_model)
+    def get(self, path: str, response_model: Optional[Type[Any]] = None, **kwargs: Any):
+        return self._add("GET", path, response_model=response_model, **kwargs)
 
-    def post(self, path: str, response_model: type | None = None):
-        return self._add("POST", path, response_model=response_model)
+    def post(self, path: str, response_model: Optional[Type[Any]] = None, **kwargs: Any):
+        return self._add("POST", path, response_model=response_model, **kwargs)
 
-    def put(self, path: str, response_model: type | None = None):
-        return self._add("PUT", path, response_model=response_model)
+    def put(self, path: str, response_model: Optional[Type[Any]] = None, **kwargs: Any):
+        return self._add("PUT", path, response_model=response_model, **kwargs)
 
-    def delete(self, path: str, response_model: type | None = None):
-        return self._add("DELETE", path, response_model=response_model)
+    def delete(self, path: str, response_model: Optional[Type[Any]] = None, **kwargs: Any):
+        return self._add("DELETE", path, response_model=response_model, **kwargs)
 
-    def patch(self, path: str, response_model: type | None = None):
-        return self._add("PATCH", path, response_model=response_model)
+    def patch(self, path: str, response_model: Optional[Type[Any]] = None, **kwargs: Any):
+        return self._add("PATCH", path, response_model=response_model, **kwargs)
 
-    def websocket(self, path: str):
-        return self._add("WS", path)
+    def websocket(self, path: str, **kwargs: Any):
+        return self._add("WS", path, **kwargs)
 
     def frontend(self, path: str = "/", directory: str = "dist"):
         """Serve a built static frontend app (e.g. Vite, React, Vue, Svelte output directory)."""
@@ -50,4 +73,3 @@ class APIRouter:
 
         self.get(root_path)(lambda: handler(""))
         self.get(wildcard_path)(lambda file_path="": handler(file_path))
-
