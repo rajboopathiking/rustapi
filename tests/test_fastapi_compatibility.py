@@ -190,3 +190,37 @@ def test_app_and_router_advanced_fastapi_features(tmp_path):
     assert app is not None
 
 
+def test_user_router_tags_in_openapi_spec():
+    from rustapi import Engine, APIRouter
+    import threading, time, requests
+
+    app = Engine()
+    crud_router = APIRouter(tags=["photos"])
+
+    @crud_router.get("/")
+    def health_check():
+        return {"message": "Photo upload service is running"}
+
+    @crud_router.post("/upload")
+    def upload_files(req):
+        return {"status": "success"}
+
+    app.include_router(crud_router, prefix="/photos", tags=["photos"])
+
+    port = 8999
+    thread = threading.Thread(target=lambda: app.run(host="127.0.0.1", port=port), daemon=True)
+    thread.start()
+    time.sleep(0.3)
+
+    resp = requests.get(f"http://127.0.0.1:{port}/openapi.json")
+    assert resp.status_code == 200
+    spec = resp.json()
+
+    assert "/photos/" in spec["paths"]
+    assert "/photos/upload" in spec["paths"]
+    assert spec["paths"]["/photos/"]["get"]["tags"] == ["photos"]
+    assert spec["paths"]["/photos/upload"]["post"]["tags"] == ["photos"]
+
+
+
+
