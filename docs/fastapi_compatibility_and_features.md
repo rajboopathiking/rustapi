@@ -219,7 +219,7 @@ async def analyze(req: Request):
 
 ---
 
-## 9. Full Python Ecosystem Interoperability & v0.3.86 / v0.1.86 Enhancements
+## 9. Full Python Ecosystem Interoperability & Release v0.8.6
 
 `pyrustapi` features zero-limitation compatibility with the Python library ecosystem:
 
@@ -228,11 +228,20 @@ async def analyze(req: Request):
 | **Databases & Async ORMs** | `SQLAlchemy`, `asyncpg`, `aiosqlite`, `tortoise-orm`, `peewee` | Context managers & `yield` generator sessions in `Depends(get_db)` |
 | **Data Validation** | `pydantic` v2, `msgspec`, `attrs`, `dataclasses` | Full request body parsing, field validation & 422 coercion |
 | **Security & Auth** | `pyjwt`, `python-jose`, `passlib`, `argon2-cffi`, `cryptography` | Bearer token validation, password hashing & custom claims |
-| **Machine Learning & AI** | `torch`, `tensorflow`, `numpy`, `pandas`, `scikit-learn` | In-memory matrix computation on upload byte streams |
+| **Machine Learning & AI** | `torch`, `tensorflow`, `scikit-learn`, `onnxruntime`, `xgboost` | Model inference & tensor computation on upload byte streams |
 | **HTTP & Async Testing** | `httpx`, `requests`, `aiohttp`, `starlette.testclient` | ASGI 3.0 (`app(scope, receive, send)`) & `ASGITransport` support |
 | **Async Task Queues** | `celery`, `redis`, `rq`, `dramatiq` | Background task enqueueing inside async route handlers |
+| **Domain Specific & Rare** | `biopython`, `rdkit`, `geopandas`, `cv2`, `librosa`, `numba` | Native C-extensions, CUDA acceleration & JIT compiled functions |
 
-### Key Improvements in v0.3.86 / v0.1.86:
+### Support for Rare & Native C-Extension Libraries
+
+`pyrustapi` is **not** an interpreter transpile layer; it executes directly inside the native CPython runtime via PyO3 C-bindings. Therefore, **100% of Python libraries work with zero limitations**:
+
+- **C / C++ / Cython Extensions** (`ctypes`, `cffi`, `pybind11`, `.so` / `.dylib`): Linked directly to standard CPython ABI memory.
+- **Scientific & ML Accelerators** (`torch`, `cuda`, `scikit-learn`, `numba`, `scipy`): GPU tensor execution & JIT function evaluation operate seamlessly.
+- **Domain-Specific Packages** (`biopython`, `rdkit`, `astropy`, `cv2`, `librosa`): Native binary dependencies load and execute without modification.
+
+### Key Improvements in Release v0.8.6:
 
 1. **Native OpenAPI `securitySchemes` & Swagger UI "Authorize 🔓"**:
    Automatically detects `HTTPBearer`, `OAuth2PasswordBearer(tokenUrl=...)`, `APIKeyHeader`, `APIKeyQuery`, and `HTTPBasic` dependencies to output `components.securitySchemes` in `/openapi.json`, activating interactive auth testing in Swagger UI (`/docs`).
@@ -240,4 +249,6 @@ async def analyze(req: Request):
    Directly propagates custom status codes (`401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `422 Unprocessable Entity`) without falling back to 500 Internal Server Errors.
 3. **Recursive Dependency & Request Injection**:
    Resolves nested `Depends(sub_dep)` chains and injects `request: Request` automatically across all dependency tiers.
+4. **Dual Async / Sync Payload Helpers**:
+   Provides `AwaitableDict` for `req.json()` and `AwaitableBytes` for `UploadFile.read()`, allowing both `await req.json()` and `req.json()` inside sync/async ML route handlers.
 
