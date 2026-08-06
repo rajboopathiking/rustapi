@@ -105,6 +105,32 @@ Visiting `http://127.0.0.1:8000/docs` will render the customized Swagger UI inte
 
 ---
 
+### Swagger UI Security & Interactive Authorize (Top Lock Button) (v0.7.86)
+
+RustAPI automatically detects all 8 security dependencies from `rustapi.security` (`HTTPBearer`, `OAuth2PasswordBearer`, `OAuth2AuthorizationCodeBearer`, `APIKeyHeader`, `APIKeyQuery`, `APIKeyCookie`, `HTTPBasic`, `HTTPDigest`, `OpenIdConnect`) across direct and nested dependencies (`Depends(...)`).
+
+When security dependencies are declared on route handlers:
+1. **OpenAPI SecuritySchemes**: RustAPI auto-populates `components.securitySchemes` in `/openapi.json`.
+2. **Path Operation Security**: Each protected route receives `"security": [{ "<scheme_name>": [] }]`.
+3. **Top Authorize Lock Button (🔒)**: Swagger UI served at `/docs` displays the interactive **Authorize** top lock button. Developers can click Authorize, enter Bearer tokens, API keys, or OAuth2 credentials, and test protected endpoints directly within Swagger UI!
+
+```python
+from rustapi import FastAPI, Depends
+from rustapi.security import OAuth2PasswordBearer, HTTPBearer, APIKeyHeader
+
+app = FastAPI(title="Secure API", version="0.7.86")
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
+bearer_scheme = HTTPBearer()
+api_key_scheme = APIKeyHeader(name="X-API-Key")
+
+@app.get("/users/me")
+def read_user(token: str = Depends(oauth2_scheme)):
+    return {"token": token}
+```
+
+---
+
 ## 2. Route Handler Signature (req vs Parameter Injection)
 
 ### FastAPI DX
