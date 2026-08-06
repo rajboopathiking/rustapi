@@ -61,8 +61,8 @@
 ## 📚 Documentation Reference
 
 Detailed documentation is available in the [`docs/`](docs/) directory and project reference:
-- [📖 Getting Started & Core Routing](https://raw.githubusercontent.com/rajboopathiking/rustapi/master/docs/getting_started.md)
-- [📚 Complete API & Migration Guide](https://raw.githubusercontent.com/rajboopathiking/rustapi/master/docs/docs.md)
+- [📖 Getting Started & Core Routing](https://github.com/rajboopathiking/rustapi/blob/master/docs/md/getting_started.md)
+- [📚 Complete API & Migration Guide](https://github.com/rajboopathiking/rustapi/blob/master/docs/md/docs.md)
 ---
 
 ## 🛠️ Local Development & Testing
