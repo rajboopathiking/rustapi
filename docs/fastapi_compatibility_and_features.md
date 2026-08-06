@@ -11,13 +11,13 @@ RustAPI (`pyrustapi`) provides **1:1 FastAPI compatibility**, enabling developer
 | **`FastAPI` Alias** | `from rustapi import FastAPI` | Class alias for `Engine` for 100% drop-in FastAPI compatibility. |
 | **`Request` Alias** | `from rustapi import Request` | Class alias for `PyRequest`. |
 | **Status Codes** | `from rustapi import status` | Starlette/FastAPI status code constants (`status.HTTP_200_OK`, `status.HTTP_404_NOT_FOUND`, etc.). |
-| **OpenAPI & Docs UI** | `from rustapi.openapi import get_swagger_ui_html, get_redoc_html` | Interactive Swagger UI (`/docs`) and ReDoc (`/redoc`) HTML generators. |
+| **OpenAPI & Specs** | `from rustapi.openapi import get_swagger_ui_html, get_redoc_html, get_openapi, models` | Interactive Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI 3.1.0 specification models & generators. |
 | **Response Classes** | `from rustapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse` | Full range of FastAPI response classes. |
 | **CORS Middleware** | `from rustapi.middleware.cors import CORSMiddleware` | Middleware class & `app.add_middleware()` for configuring cross-origin requests. |
 | **Server-Sent Events** | `from rustapi import EventSourceResponse, ServerSentEvent, format_sse_event` | Real-time SSE streaming for AI/LLM tokens and Model Context Protocol (MCP). |
 | **Data Encoders** | `from rustapi import jsonable_encoder` | Convert Pydantic models, Dataclasses, Datetime, UUID, and dicts to JSON-serializable primitives. |
 | **Parameter Markers** | `from rustapi import Body, Query, Path, Header, Cookie, Form, File, Security` | Location markers for dependency injection and parameter validation. |
-| **Security Modules** | `from rustapi.security import OAuth2PasswordBearer, HTTPBearer, APIKeyHeader` | Pre-built security authentication dependency helpers. |
+| **Security Modules** | `from rustapi.security import OAuth2PasswordBearer, OAuth2AuthorizationCodeBearer, HTTPBearer, HTTPBasic, APIKeyHeader, APIKeyQuery, APIKeyCookie, OpenIdConnect, SecurityScopes, SecurityBase` | 100% FastAPI-compatible security authentication dependency helpers. |
 | **Frontend Serving** | `app.frontend("/", directory="dist")` / `router.frontend(...)` | Serve built React, Vue, Svelte, or Vite single-page apps with client-side routing fallback. |
 | **WebSocket Exceptions**| `from rustapi import WebSocketDisconnect, WebSocketException` | Exception classes for handling WebSocket disconnection events. |
 
@@ -47,7 +47,7 @@ Serve custom interactive documentation endpoints using `get_swagger_ui_html` and
 
 ```python
 from rustapi import FastAPI
-from rustapi.openapi import get_swagger_ui_html, get_redoc_html
+from rustapi.openapi import get_swagger_ui_html, get_redoc_html, get_openapi
 
 app = FastAPI()
 
@@ -57,6 +57,44 @@ def custom_swagger_ui():
         openapi_url="/openapi.json",
         title="My Custom API Docs",
     )
+
+@app.get("/openapi.json", include_in_schema=False)
+def get_custom_openapi():
+    return get_openapi(
+        title="RustAPI Application",
+        version="1.0.0",
+        description="OpenAPI 3.1.0 specification generated dynamically.",
+        routes=app.routes,
+    )
+```
+
+### Security Modules (`rustapi.security`)
+
+`rustapi.security` provides complete 1:1 FastAPI compatibility for security dependency schemes:
+
+```python
+from rustapi import Depends, FastAPI
+from rustapi.security import (
+    OAuth2PasswordBearer,
+    OAuth2PasswordRequestForm,
+    HTTPBearer,
+    HTTPBasic,
+    APIKeyHeader,
+    SecurityScopes,
+)
+
+app = FastAPI()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+api_key_scheme = APIKeyHeader(name="X-API-Key")
+
+@app.post("/token")
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    return {"access_token": form_data.username, "token_type": "bearer"}
+
+@app.get("/protected")
+def protected_route(token: str = Depends(oauth2_scheme), api_key: str = Depends(api_key_scheme)):
+    return {"token": token, "api_key": api_key}
+```
 
 @app.get("/redoc", include_in_schema=False)
 def custom_redoc_ui():

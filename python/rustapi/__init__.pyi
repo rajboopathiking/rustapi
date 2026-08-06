@@ -19,13 +19,13 @@ class PyRequest:
         self,
         method: str,
         path: str,
-        path_params: Dict[str, str],
-        query_params: Dict[str, str],
-        headers: Dict[str, str],
-        cookies: Dict[str, str],
-        form: Dict[str, str],
-        files: Dict[str, List[UploadFile]],
-        body: str,
+        path_params: Optional[Dict[str, str]] = ...,
+        query_params: Optional[Dict[str, str]] = ...,
+        headers: Optional[Dict[str, str]] = ...,
+        cookies: Optional[Dict[str, str]] = ...,
+        form: Optional[Dict[str, str]] = ...,
+        files: Optional[Dict[str, List[UploadFile]]] = ...,
+        body: Optional[str] = ...,
     ) -> None: ...
     def json(self) -> Any: ...
 

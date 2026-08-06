@@ -16,7 +16,7 @@
 
 | Feature Area | Implementation Details |
 | :--- | :--- |
-| **FastAPI Compatibility** | `FastAPI` & `Request` aliases, `status` codes, `EventSourceResponse` (SSE), `jsonable_encoder`, `Query`/`Body`/`Path`, `OAuth2PasswordBearer`, `app.frontend()`. |
+| **FastAPI Compatibility** | `FastAPI` & `Request` aliases, `status` codes, `EventSourceResponse` (SSE), `jsonable_encoder`, `Query`/`Body`/`Path`, `OAuth2PasswordBearer`, `HTTPBearer`, `APIKeyHeader`, `OpenIdConnect`, `get_openapi`, `app.frontend()`. |
 | **HTTP & Routing** | FastAPI-style `@app.get`, `@app.post`, `APIRouter`, `Depends`, `app.dependency_overrides`, `response_model`, `reload=True`. |
 | **Rust-Native Tier 3 Routes** | `app.add_native_route()` zero-GIL C-speed fast-paths (**50,000+ req/sec**). |
 | **Database Engine** | `sqlx` SQLite & PostgreSQL pool (`app.connect_db()`) with zero-copy JSON streaming (`db.query_json()`). |

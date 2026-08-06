@@ -21,7 +21,7 @@
 
 | Section | Content Covered | Developer Benefit |
 | :--- | :--- | :--- |
-| **FastAPI Compatibility** | `from rustapi import FastAPI, Request, status`, `get_swagger_ui_html`, `EventSourceResponse` (SSE), `jsonable_encoder`, `Query`/`Body`/`Path`, `app.frontend()`. | Complete FastAPI drop-in compatibility and SSE/SPA helpers (see [`fastapi_compatibility_and_features.md`](fastapi_compatibility_and_features.md)). |
+| **FastAPI Compatibility** | `from rustapi import FastAPI, Request, status`, `from rustapi.security import OAuth2PasswordBearer, HTTPBearer, APIKeyHeader, OpenIdConnect, SecurityScopes`, `from rustapi.openapi import get_swagger_ui_html, get_openapi, models`. | 100% FastAPI drop-in compatibility, security dependency modules, OpenAPI 3.1.0 models & generators, and SSE/SPA helpers (see [`fastapi_compatibility_and_features.md`](fastapi_compatibility_and_features.md)). |
 | **§1. Core Engine & Routing** | `Engine()`, `@app.get`, `@app.post`, `@app.put`, `@app.delete`, `@app.patch`, `sync` and `async def` handlers. | Quick reference for routing syntax & handler types. |
 | **§2. Request Metadata & Errors** | `req` (`PyRequest`) object, custom `Response(..., status_code, headers)`, `HTTPException`. | Inspect headers, query/path params, and raise clean HTTP errors. |
 | **💡 FastAPI `Request` vs `req`** | Full property comparison table (`method`, `path`, `headers`, `cookies`, `form`, `files`, `body`, `json()`). | Eliminates confusion when migrating from FastAPI to RustAPI. |
