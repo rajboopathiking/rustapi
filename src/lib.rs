@@ -291,14 +291,26 @@ fn generate_openapi(routes: &[RouteEntry]) -> String {
         // Security schemes collection
         let mut route_security = Vec::new();
         Python::with_gil(|py| {
+            let mut stack = Vec::new();
             for dep in &r.dependencies {
-                let bound_fn = dep.func.bind(py);
+                stack.push(dep.func.bind(py).clone());
+            }
+
+            let mut visited = std::collections::HashSet::new();
+            let inspect = py.import_bound("inspect").ok();
+
+            while let Some(bound_fn) = stack.pop() {
+                let dep_ptr = bound_fn.as_ptr() as usize;
+                if !visited.insert(dep_ptr) { continue; }
+
                 let type_name = bound_fn.get_type().name().map(|n| n.to_string()).unwrap_or_default();
 
                 if type_name == "HTTPBearer" || bound_fn.getattr("bearerFormat").is_ok() {
                     let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "HTTPBearer".to_string());
                     security_schemes.insert(s_name.clone(), json!({ "type": "http", "scheme": "bearer" }));
-                    route_security.push(json!({ s_name: [] }));
+                    if !route_security.iter().any(|s: &serde_json::Value| s.get(&s_name).is_some()) {
+                        route_security.push(json!({ s_name: [] }));
+                    }
                 } else if type_name == "OAuth2PasswordBearer" || bound_fn.getattr("tokenUrl").is_ok() {
                     let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "OAuth2PasswordBearer".to_string());
                     let token_url = bound_fn.getattr("tokenUrl").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "/token".to_string());
@@ -306,21 +318,57 @@ fn generate_openapi(routes: &[RouteEntry]) -> String {
                         "type": "oauth2",
                         "flows": { "password": { "tokenUrl": token_url, "scopes": {} } }
                     }));
-                    route_security.push(json!({ s_name: [] }));
+                    if !route_security.iter().any(|s: &serde_json::Value| s.get(&s_name).is_some()) {
+                        route_security.push(json!({ s_name: [] }));
+                    }
                 } else if type_name == "APIKeyHeader" {
                     let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "APIKeyHeader".to_string());
                     let key_name = bound_fn.getattr("name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "X-API-Key".to_string());
                     security_schemes.insert(s_name.clone(), json!({ "type": "apiKey", "name": key_name, "in": "header" }));
-                    route_security.push(json!({ s_name: [] }));
+                    if !route_security.iter().any(|s: &serde_json::Value| s.get(&s_name).is_some()) {
+                        route_security.push(json!({ s_name: [] }));
+                    }
                 } else if type_name == "APIKeyQuery" {
                     let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "APIKeyQuery".to_string());
                     let key_name = bound_fn.getattr("name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "api_key".to_string());
                     security_schemes.insert(s_name.clone(), json!({ "type": "apiKey", "name": key_name, "in": "query" }));
-                    route_security.push(json!({ s_name: [] }));
+                    if !route_security.iter().any(|s: &serde_json::Value| s.get(&s_name).is_some()) {
+                        route_security.push(json!({ s_name: [] }));
+                    }
                 } else if type_name == "HTTPBasic" {
                     let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "HTTPBasic".to_string());
                     security_schemes.insert(s_name.clone(), json!({ "type": "http", "scheme": "basic" }));
-                    route_security.push(json!({ s_name: [] }));
+                    if !route_security.iter().any(|s: &serde_json::Value| s.get(&s_name).is_some()) {
+                        route_security.push(json!({ s_name: [] }));
+                    }
+                } else if let Some(ref insp) = inspect {
+                    if let Ok(sig) = insp.call_method1("signature", (&bound_fn,)) {
+                        if let Ok(params) = sig.getattr("parameters") {
+                            if let Ok(values) = params.call_method0("values") {
+                                if let Ok(iter) = values.iter() {
+                                    for p_res in iter {
+                                        if let Ok(p) = p_res {
+                                            if let Ok(d_val) = p.getattr("default") {
+                                                let is_depends = d_val
+                                                    .getattr("__class__")
+                                                    .and_then(|cls| cls.getattr("__name__"))
+                                                    .and_then(|n| n.extract::<String>())
+                                                    .map(|n| n == "Depends")
+                                                    .unwrap_or(false);
+                                                if is_depends {
+                                                    if let Ok(sub_fn) = d_val.getattr("dependency") {
+                                                        if !sub_fn.is_none() {
+                                                            stack.push(sub_fn);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -653,20 +701,28 @@ struct PyRequest {
 #[pymethods]
 impl PyRequest {
     #[new]
-    #[pyo3(signature = (method, path, path_params, query_params, headers, cookies, form, files, body))]
+    #[pyo3(signature = (method, path, path_params=None, query_params=None, headers=None, cookies=None, form=None, files=None, body=None))]
     fn new(
         method: String,
         path: String,
-        path_params: HashMap<String, String>,
-        query_params: HashMap<String, String>,
-        headers: HashMap<String, String>,
-        cookies: HashMap<String, String>,
-        form: HashMap<String, String>,
-        files: HashMap<String, Vec<PyUploadFile>>,
-        body: String,
+        path_params: Option<HashMap<String, String>>,
+        query_params: Option<HashMap<String, String>>,
+        headers: Option<HashMap<String, String>>,
+        cookies: Option<HashMap<String, String>>,
+        form: Option<HashMap<String, String>>,
+        files: Option<HashMap<String, Vec<PyUploadFile>>>,
+        body: Option<String>,
     ) -> Self {
         PyRequest {
-            method, path, path_params, query_params, headers, cookies, form, files, body
+            method,
+            path,
+            path_params: path_params.unwrap_or_default(),
+            query_params: query_params.unwrap_or_default(),
+            headers: headers.unwrap_or_default(),
+            cookies: cookies.unwrap_or_default(),
+            form: form.unwrap_or_default(),
+            files: files.unwrap_or_default(),
+            body: body.unwrap_or_default(),
         }
     }
 
@@ -1091,6 +1147,116 @@ def _schema_from_signature(func):
             content_type: content_type.to_string(),
         };
         self.native_routes.lock().unwrap().push(entry);
+    }
+
+    #[pyo3(signature = (method, path, query_string, headers, body))]
+    fn dispatch_request(
+        &self,
+        py: Python<'_>,
+        method: String,
+        path: String,
+        query_string: String,
+        headers: HashMap<String, String>,
+        body: String,
+    ) -> PyResult<PyObject> {
+        let asyncio = py.import_bound("asyncio")?;
+        let loop_obj = asyncio.call_method0("get_running_loop").or_else(|_| asyncio.call_method0("get_event_loop"))?;
+        let fut = loop_obj.call_method0("create_future")?;
+        let loop_py: PyObject = loop_obj.clone().unbind().into();
+        let fut_py: PyObject = fut.clone().unbind().into();
+        let fut_py_cb = fut_py.clone_ref(py);
+        let loop_py_cb = loop_py.clone_ref(py);
+
+        let routes = self.routes.clone();
+        let native_routes = self.native_routes.clone();
+        let serializer = Arc::new(self.serializer.clone_ref(py));
+        let filter_response = Arc::new(self.filter_response_fn.clone_ref(py));
+        let schedule_coro = Arc::new(self.schedule_coro_fn.clone_ref(py));
+        let gil_sem = Arc::new(Semaphore::new(100));
+        let dependency_overrides = Arc::new(self.dependency_overrides.clone_ref(py));
+
+        get_db_rt().spawn(async move {
+            let matched_native = {
+                let guard = native_routes.lock().unwrap();
+                match_native_route(&guard, &method, &path)
+            };
+            if let Some(entry) = matched_native {
+                let mut h = HashMap::new();
+                h.insert("content-type".to_string(), entry.content_type);
+                Python::with_gil(|py| {
+                    let res_tuple: PyObject = (entry.status_code, entry.body, h).into_py(py);
+                    if let Ok(set_res) = fut_py_cb.bind(py).getattr("set_result") {
+                        let _ = loop_py_cb.bind(py).call_method1("call_soon_threadsafe", (set_res, res_tuple));
+                    }
+                });
+                return;
+            }
+
+            let query_params = parse_query(if query_string.is_empty() { None } else { Some(&query_string) });
+            let mut cookies_map = HashMap::new();
+            if let Some(c_hdr) = headers.get("cookie").or_else(|| headers.get("Cookie")) {
+                for pair in c_hdr.split(';') {
+                    let mut parts = pair.trim().splitn(2, '=');
+                    if let (Some(ck), Some(cv)) = (parts.next(), parts.next()) {
+                        cookies_map.insert(ck.to_string(), cv.to_string());
+                    }
+                }
+            }
+
+            let matched = {
+                let guard = routes.lock().unwrap();
+                match_route(&guard, &method, &path)
+            };
+
+            if let Some((idx, path_params)) = matched {
+                let resp_res = handle_route(
+                    idx, path_params, method, path, body, headers, cookies_map, query_params,
+                    HashMap::new(), HashMap::new(), &routes, &serializer, &filter_response,
+                    &schedule_coro, &gil_sem, &dependency_overrides,
+                ).await;
+
+                match resp_res {
+                    Ok(resp) => {
+                        let status = resp.status().as_u16();
+                        let mut resp_headers = HashMap::new();
+                        for (k, v) in resp.headers() {
+                            resp_headers.insert(k.as_str().to_string(), v.to_str().unwrap_or("").to_string());
+                        }
+                        let body_bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap_or_default().to_vec();
+                        let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+
+                        Python::with_gil(|py| {
+                            let res_tuple: PyObject = (status, body_str, resp_headers).into_py(py);
+                            if let Ok(set_res) = fut_py_cb.bind(py).getattr("set_result") {
+                                let _ = loop_py_cb.bind(py).call_method1("call_soon_threadsafe", (set_res, res_tuple));
+                            }
+                        });
+                    }
+                    Err(err_msg) => {
+                        Python::with_gil(|py| {
+                            let mut h = HashMap::new();
+                            h.insert("content-type".to_string(), "application/json".to_string());
+                            let err_json = format!(r#"{{"detail":"{}"}}"#, err_msg.replace('"', "'"));
+                            let res_tuple: PyObject = (500, err_json, h).into_py(py);
+                            if let Ok(set_res) = fut_py_cb.bind(py).getattr("set_result") {
+                                let _ = loop_py_cb.bind(py).call_method1("call_soon_threadsafe", (set_res, res_tuple));
+                            }
+                        });
+                    }
+                }
+            } else {
+                Python::with_gil(|py| {
+                    let mut h = HashMap::new();
+                    h.insert("content-type".to_string(), "application/json".to_string());
+                    let res_tuple: PyObject = (404, r#"{"detail":"Not Found"}"#.to_string(), h).into_py(py);
+                    if let Ok(set_res) = fut_py_cb.bind(py).getattr("set_result") {
+                        let _ = loop_py_cb.bind(py).call_method1("call_soon_threadsafe", (set_res, res_tuple));
+                    }
+                });
+            }
+        });
+
+        Ok(fut_py)
     }
 
     // -- Rust-Native Database Engine ---------------------------------------

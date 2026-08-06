@@ -1,6 +1,9 @@
 import json
 from typing import Any, Optional
-from .. import Response
+try:
+    from .._rustapi import Response
+except ImportError:
+    from .._rustapi import PyResponse as Response
 
 class HTMLResponse(Response):
     """HTML response wrapper setting Content-Type: text/html; charset=utf-8."""
