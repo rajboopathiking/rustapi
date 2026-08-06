@@ -149,3 +149,38 @@ def test_7_openapi_security_schemes_and_http_exception_status_codes():
     assert res_unauth.status_code == 401
     assert "Not authenticated" in res_unauth.json()["detail"] or "Unauthorized" in res_unauth.json()["detail"]
 
+
+def test_8_async_generator_dependency_teardown():
+    """Verify async generator dependencies (e.g. async def get_db(): yield db) teardown cleanly."""
+    import threading, time, requests
+    from rustapi import FastAPI, Depends
+
+    app = FastAPI(title="Async Generator Teardown Test")
+
+    events = []
+
+    async def get_db_session():
+        events.append("enter_db")
+        try:
+            yield {"session_id": "db-123"}
+        finally:
+            events.append("exit_db")
+
+    @app.get("/items")
+    async def list_items(db=Depends(get_db_session)):
+        events.append("handler_exec")
+        return {"db": db}
+
+    def run_server():
+        app.run(host="127.0.0.1", port=8998)
+
+    t = threading.Thread(target=run_server, daemon=True)
+    t.start()
+    time.sleep(1.5)
+
+    res = requests.get("http://127.0.0.1:8998/items")
+    assert res.status_code == 200
+    assert res.json() == {"db": {"session_id": "db-123"}}
+    assert events == ["enter_db", "handler_exec", "exit_db"], f"Expected teardown order, got {events}"
+
+
