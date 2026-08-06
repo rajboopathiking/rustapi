@@ -2236,7 +2236,7 @@ async fn handle_route(
     let mut dependency_error_response: Option<HyperResponse<Body>> = None;
     let mut resolved_args   = HashMap::<String, PyObject>::new();
     let dep_cache_obj       = Python::with_gil(|py| pyo3::types::PyDict::new_bound(py).into_any().unbind());
-    let teardown_gens       = Vec::<PyObject>::new();
+    let teardown_list_py    = Python::with_gil(|py| pyo3::types::PyList::empty_bound(py).into_any().unbind());
 
     for dep in deps {
         let dep_func = Python::with_gil(|py| -> PyObject {
@@ -2254,7 +2254,7 @@ async fn handle_route(
             let resolver = py.import_bound("rustapi.resolver")?;
             let solver = resolver.getattr("solve_dependency")?;
             let ov_bound = dependency_overrides.bind(py);
-            solver.call1((dep_func, &req_obj, ov_bound, &dep_cache_obj)).map(|c| c.unbind())
+            solver.call1((dep_func, &req_obj, ov_bound, &dep_cache_obj, &teardown_list_py)).map(|c| c.unbind())
         });
 
         match solve_coro {
@@ -2485,16 +2485,25 @@ async fn handle_route(
     }
 
     // Dependency teardown generators.
-    if !teardown_gens.is_empty() {
-        tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| {
-                if let Ok(builtins) = py.import_bound("builtins") {
-                    for gen in teardown_gens {
-                        let _ = builtins.call_method1("next", (&gen,));
-                    }
-                }
-            });
+    let teardown_coro = Python::with_gil(|py| -> Option<PyObject> {
+        let list_bound = teardown_list_py.bind(py).downcast::<pyo3::types::PyList>().ok()?;
+        if list_bound.is_empty() {
+            return None;
+        }
+        let resolver = py.import_bound("rustapi.resolver").ok()?;
+        let teardown_fn = resolver.getattr("teardown_dependencies").ok()?;
+        teardown_fn.call1((list_bound,)).map(|c| c.unbind()).ok()
+    });
+
+    if let Some(coro) = teardown_coro {
+        let (tx, rx) = oneshot::channel();
+        let sc = schedule_coro.clone();
+        Python::with_gil(|py| {
+            if let Ok(cb) = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) }) {
+                let _ = sc.bind(py).call1((coro, cb));
+            }
         });
+        let _ = rx.await;
     }
 
     // Background tasks.
