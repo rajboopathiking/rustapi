@@ -38,6 +38,7 @@ RustAPI follows a **3-Tier Architecture** that combines FastAPI's intuitive Pyth
 - [x] **Strict Parameter Type Coercion:** Automatic casting of path and query params (`int`, `float`, `bool`) with structured 422 HTTP validation error responses.
 - [x] **Request & Response Ergonomics:** `req.json()`, `req.body`, `req.headers`, `req.cookies`, `JSONResponse`, `HTMLResponse`, `PlainTextResponse`, `RedirectResponse`, `StreamingResponse`, `UploadFile`, and `WebSocket`.
 - [x] **OpenAPI & Interactive Docs:** Automatic `/openapi.json` generation and embedded Swagger UI at `/docs`.
+- [x] **Swagger UI Security & Interactive Authorize (v0.7.86):** Automatic `components.securitySchemes` generation and interactive top **Authorize** lock button (🔒) in Swagger UI (`/docs`) for all 8 `rustapi.security` schemes.
 - [x] **Native Telemetry & Access Logging:** Real-time terminal request access logs (`INFO: 127.0.0.1 - "GET /docs HTTP/1.1" 200 - 0.85ms`).
 - [x] **Model Context Protocol (MCP) Server:** Embedded MCP tools (`@app.tool()`), resources (`@app.resource()`), and prompts (`@app.prompt()`) accessible at `POST /mcp`.
 

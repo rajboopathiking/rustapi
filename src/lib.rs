@@ -311,6 +311,17 @@ fn generate_openapi(routes: &[RouteEntry]) -> String {
                     if !route_security.iter().any(|s: &serde_json::Value| s.get(&s_name).is_some()) {
                         route_security.push(json!({ s_name: [] }));
                     }
+                } else if type_name == "OAuth2AuthorizationCodeBearer" {
+                    let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "OAuth2AuthorizationCodeBearer".to_string());
+                    let auth_url = bound_fn.getattr("authorizationUrl").and_then(|s| s.extract::<String>()).unwrap_or_default();
+                    let token_url = bound_fn.getattr("tokenUrl").and_then(|s| s.extract::<String>()).unwrap_or_default();
+                    security_schemes.insert(s_name.clone(), json!({
+                        "type": "oauth2",
+                        "flows": { "authorizationCode": { "authorizationUrl": auth_url, "tokenUrl": token_url, "scopes": {} } }
+                    }));
+                    if !route_security.iter().any(|s: &serde_json::Value| s.get(&s_name).is_some()) {
+                        route_security.push(json!({ s_name: [] }));
+                    }
                 } else if type_name == "OAuth2PasswordBearer" || bound_fn.getattr("tokenUrl").is_ok() {
                     let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "OAuth2PasswordBearer".to_string());
                     let token_url = bound_fn.getattr("tokenUrl").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "/token".to_string());
@@ -338,6 +349,37 @@ fn generate_openapi(routes: &[RouteEntry]) -> String {
                 } else if type_name == "HTTPBasic" {
                     let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "HTTPBasic".to_string());
                     security_schemes.insert(s_name.clone(), json!({ "type": "http", "scheme": "basic" }));
+                    if !route_security.iter().any(|s: &serde_json::Value| s.get(&s_name).is_some()) {
+                        route_security.push(json!({ s_name: [] }));
+                    }
+                } else if type_name == "OAuth2AuthorizationCodeBearer" {
+                    let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "OAuth2AuthorizationCodeBearer".to_string());
+                    let auth_url = bound_fn.getattr("authorizationUrl").and_then(|s| s.extract::<String>()).unwrap_or_default();
+                    let token_url = bound_fn.getattr("tokenUrl").and_then(|s| s.extract::<String>()).unwrap_or_default();
+                    security_schemes.insert(s_name.clone(), json!({
+                        "type": "oauth2",
+                        "flows": { "authorizationCode": { "authorizationUrl": auth_url, "tokenUrl": token_url, "scopes": {} } }
+                    }));
+                    if !route_security.iter().any(|s: &serde_json::Value| s.get(&s_name).is_some()) {
+                        route_security.push(json!({ s_name: [] }));
+                    }
+                } else if type_name == "APIKeyCookie" {
+                    let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "APIKeyCookie".to_string());
+                    let key_name = bound_fn.getattr("name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "session".to_string());
+                    security_schemes.insert(s_name.clone(), json!({ "type": "apiKey", "name": key_name, "in": "cookie" }));
+                    if !route_security.iter().any(|s: &serde_json::Value| s.get(&s_name).is_some()) {
+                        route_security.push(json!({ s_name: [] }));
+                    }
+                } else if type_name == "HTTPDigest" {
+                    let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "HTTPDigest".to_string());
+                    security_schemes.insert(s_name.clone(), json!({ "type": "http", "scheme": "digest" }));
+                    if !route_security.iter().any(|s: &serde_json::Value| s.get(&s_name).is_some()) {
+                        route_security.push(json!({ s_name: [] }));
+                    }
+                } else if type_name == "OpenIdConnect" {
+                    let s_name = bound_fn.getattr("scheme_name").and_then(|s| s.extract::<String>()).unwrap_or_else(|_| "OpenIdConnect".to_string());
+                    let openid_url = bound_fn.getattr("openIdConnectUrl").and_then(|s| s.extract::<String>()).unwrap_or_default();
+                    security_schemes.insert(s_name.clone(), json!({ "type": "openIdConnect", "openIdConnectUrl": openid_url }));
                     if !route_security.iter().any(|s: &serde_json::Value| s.get(&s_name).is_some()) {
                         route_security.push(json!({ s_name: [] }));
                     }
@@ -526,7 +568,16 @@ fn swagger_html() -> String {
   <script src="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-bundle.js"></script>
   <script>
     window.onload = () => {
-      window.ui = SwaggerUIBundle({ url: '/openapi.json', dom_id: '#swagger-ui' });
+      window.ui = SwaggerUIBundle({
+        url: '/openapi.json',
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        presets: [
+          SwaggerUIBundle.presets.apis,
+          SwaggerUIBundle.SwaggerUIStandalonePreset
+        ],
+        layout: "StandaloneLayout"
+      });
     };
   </script>
 </body>
@@ -1005,6 +1056,26 @@ fn serialize_value(py: Python<'_>, obj: &PyObject, serializer: &PyObject, raw_st
 // Engine
 // ---------------------------------------------------------------------------
 
+#[pyclass(name = "Route")]
+struct PyRoute {
+    #[pyo3(get)]
+    path: String,
+    #[pyo3(get)]
+    methods: Vec<String>,
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    summary: Option<String>,
+    #[pyo3(get)]
+    description: Option<String>,
+    #[pyo3(get)]
+    tags: Vec<String>,
+    #[pyo3(get)]
+    dependencies: Vec<PyObject>,
+    #[pyo3(get)]
+    endpoint: PyObject,
+}
+
 #[pyclass(name = "Engine", subclass)]
 struct Engine {
     routes: Routes,
@@ -1027,6 +1098,31 @@ struct Engine {
 #[allow(non_local_definitions)]
 #[pymethods]
 impl Engine {
+    #[getter]
+    fn routes(&self, py: Python<'_>) -> PyResult<Vec<PyRoute>> {
+        let guard = self.routes.lock().unwrap();
+        let mut list = Vec::new();
+        for r in guard.iter() {
+            let name = r.handler.getattr(py, "__name__")
+                .and_then(|n| n.extract::<String>(py))
+                .unwrap_or_else(|_| "handler".to_string());
+            let mut deps = Vec::new();
+            for d in &r.dependencies {
+                deps.push(d.func.clone_ref(py));
+            }
+            list.push(PyRoute {
+                path: r.original_path.clone(),
+                methods: vec![r.method.clone()],
+                name,
+                summary: r.summary.clone(),
+                description: r.description.clone(),
+                tags: r.tags.clone(),
+                dependencies: deps,
+                endpoint: r.handler.clone_ref(py),
+            });
+        }
+        Ok(list)
+    }
     #[new]
     fn new(py: Python<'_>) -> PyResult<Self> {
         let python_code = r#"
@@ -2850,6 +2946,7 @@ fn render_template(py: Python<'_>, template_str: String, context: PyObject) -> P
 #[pymodule]
 fn _rustapi(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Engine>()?;
+    m.add_class::<PyRoute>()?;
     m.add_class::<PyRequest>()?;
     m.add_class::<PyResponse>()?;
     m.add_class::<PyUploadFile>()?;

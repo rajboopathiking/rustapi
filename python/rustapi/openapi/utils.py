@@ -16,6 +16,7 @@ def get_openapi(
     contact: Optional[Dict[str, Any]] = None,
     license_info: Optional[Dict[str, Any]] = None,
     separate_input_output_schemas: bool = True,
+    security_schemes: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Generate OpenAPI schema dictionary from routes and metadata."""
     info_data: Dict[str, Any] = {"title": title, "version": version}
@@ -41,6 +42,9 @@ def get_openapi(
         output["tags"] = tags
 
     components: Dict[str, Any] = {"schemas": {}, "securitySchemes": {}}
+
+    if security_schemes:
+        components["securitySchemes"].update(security_schemes)
 
     if routes:
         for route in routes:
@@ -81,6 +85,44 @@ def get_openapi(
                     operation["description"] = route.description
                 if hasattr(route, "tags") and route.tags:
                     operation["tags"] = route.tags
+
+                dependencies = getattr(route, "dependencies", [])
+                route_security = []
+                for dep in dependencies:
+                    fn = getattr(dep, "func", None) or dep
+                    scheme_name = getattr(fn, "scheme_name", None)
+                    if scheme_name:
+                        cls_name = fn.__class__.__name__
+                        if cls_name == "HTTPBearer" or hasattr(fn, "bearerFormat"):
+                            components["securitySchemes"][scheme_name] = {"type": "http", "scheme": "bearer"}
+                        elif cls_name == "OAuth2PasswordBearer" or hasattr(fn, "tokenUrl"):
+                            token_url = getattr(fn, "tokenUrl", "/token")
+                            components["securitySchemes"][scheme_name] = {
+                                "type": "oauth2",
+                                "flows": {"password": {"tokenUrl": token_url, "scopes": {}}}
+                            }
+                        elif cls_name == "APIKeyHeader":
+                            name = getattr(fn, "name", "X-API-Key")
+                            components["securitySchemes"][scheme_name] = {"type": "apiKey", "name": name, "in": "header"}
+                        elif cls_name == "APIKeyQuery":
+                            name = getattr(fn, "name", "api_key")
+                            components["securitySchemes"][scheme_name] = {"type": "apiKey", "name": name, "in": "query"}
+                        elif cls_name == "APIKeyCookie":
+                            name = getattr(fn, "name", "session")
+                            components["securitySchemes"][scheme_name] = {"type": "apiKey", "name": name, "in": "cookie"}
+                        elif cls_name == "HTTPBasic":
+                            components["securitySchemes"][scheme_name] = {"type": "http", "scheme": "basic"}
+                        elif cls_name == "HTTPDigest":
+                            components["securitySchemes"][scheme_name] = {"type": "http", "scheme": "digest"}
+                        elif cls_name == "OpenIdConnect":
+                            openid_url = getattr(fn, "openIdConnectUrl", "")
+                            components["securitySchemes"][scheme_name] = {"type": "openIdConnect", "openIdConnectUrl": openid_url}
+
+                        if {scheme_name: []} not in route_security:
+                            route_security.append({scheme_name: []})
+
+                if route_security:
+                    operation["security"] = route_security
 
                 path_item[method_lower] = operation
 

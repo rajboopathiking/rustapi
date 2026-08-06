@@ -2,6 +2,7 @@ from typing import Any, Dict, Optional
 from .status import status
 from ._rustapi import (
     Engine,
+    Route,
     PyRequest,
     UploadFile,
     WebSocket,
@@ -224,10 +225,11 @@ class RedirectResponse(Response):
         return Response.__new__(cls, content="", status_code=status_code, headers=h)
 
 
-__version__ = "0.11.86"
+__version__ = "0.7.86"
 __all__ = [
     "Engine",
     "FastAPI",
+    "Route",
     "PyRequest",
     "Request",
     "Response",
