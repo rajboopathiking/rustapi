@@ -61,18 +61,8 @@
 ## 📚 Documentation Reference
 
 Detailed documentation is available in the [`docs/`](docs/) directory and project reference:
-- [📖 Getting Started & Core Routing](docs/getting_started.md)
-- [⚡ FastAPI Compatibility & Feature Guide](docs/fastapi_compatibility_and_features.md)
-- [📚 Complete API & Migration Guide](docs/docs.md)
-- [🏛️ 3-Tier Architecture Guide](docs/3tier_architecture_and_benchmarks.md)
-- [⚡ Tier 3 Rust-Native Business Logic Guide](docs/native_business_logic.md)
-- [🗄️ Rust-Native Database Engine](docs/database_engine.md)
-- [🔐 Embedded Rust Power Primitives (JWT, Argon2, MiniJinja)](docs/power_primitives.md)
-- [🤖 Model Context Protocol (MCP) Server](docs/mcp_server.md)
-- [📦 Response Types & Request Ergonomics](docs/response_types.md)
-- [📊 Swagger UI & DX Deviations Guide](docs/swagger_ui_and_dx_deviations.md)
-- [📊 Empirical Performance Benchmark Report](performance-reports/fastapi_vs_hybrid_vs_native.md)
-
+- [📖 Getting Started & Core Routing](https://raw.githubusercontent.com/rajboopathiking/rustapi/master/docs/getting_started.md)
+- [📚 Complete API & Migration Guide](https://raw.githubusercontent.com/rajboopathiking/rustapi/master/docs/docs.md)
 ---
 
 ## 🛠️ Local Development & Testing
