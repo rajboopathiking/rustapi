@@ -257,7 +257,7 @@ async def analyze(req: Request):
 
 ---
 
-## 9. Full Python Ecosystem Interoperability & Release v0.7.86
+## 9. Full Python Ecosystem Interoperability & Release v1.8.7
 
 `pyrustapi` features zero-limitation compatibility with the Python library ecosystem:
 
@@ -279,7 +279,7 @@ async def analyze(req: Request):
 - **Scientific & ML Accelerators** (`torch`, `cuda`, `scikit-learn`, `numba`, `scipy`): GPU tensor execution & JIT function evaluation operate seamlessly.
 - **Domain-Specific Packages** (`biopython`, `rdkit`, `astropy`, `cv2`, `librosa`): Native binary dependencies load and execute without modification.
 
-### Authentication & Authorization Code Pattern (v0.7.86)
+### Authentication & Authorization Code Pattern (v1.8.7)
 
 ```python
 import jwt
@@ -291,7 +291,7 @@ from rustapi.security import (
     APIKeyHeader,
 )
 
-app = FastAPI(title="Production Auth API", version="0.7.86")
+app = FastAPI(title="Production Auth API", version="1.8.7")
 
 SECRET_KEY = "your-256-bit-secret-key"
 ALGORITHM = "HS256"
@@ -333,10 +333,10 @@ async def read_audit_logs(admin: dict = Depends(get_admin_user)):
     return {"logs": [], "accessed_by": admin["username"]}
 ```
 
-### Key Improvements in Release v0.7.86:
+### Key Improvements in Release v1.8.7:
 
-1. **Swagger UI Security & Interactive Authorize (Top Lock Button 🔒)**:
-   Automatically registers `components.securitySchemes` in `/openapi.json` and attaches `security` operation requirements across all 8 security schemes (`HTTPBearer`, `OAuth2PasswordBearer`, `OAuth2AuthorizationCodeBearer`, `APIKeyHeader`, `APIKeyQuery`, `APIKeyCookie`, `HTTPBasic`, `HTTPDigest`, `OpenIdConnect`), rendering the top **Authorize** lock button in `/docs`.
+1. **Swagger UI Security & Interactive Authorize (FastAPI Parity 🔒)**:
+   Automatically registers `components.securitySchemes` in `/openapi.json` and attaches `security` operation requirements across all 8 security schemes (`HTTPBearer`, `OAuth2PasswordBearer`, `OAuth2AuthorizationCodeBearer`, `APIKeyHeader`, `APIKeyQuery`, `APIKeyCookie`, `HTTPBasic`, `HTTPDigest`, `OpenIdConnect`), rendering the **Authorize** lock button in `/docs`. Uses `BaseLayout`, injects `initOAuth`, and supports `/docs/oauth2-redirect` to exactly match FastAPI's UI.
 2. **Recursive Sub-Dependency OpenAPI SecuritySchemes**:
    Automatically unrolls nested dependencies (`Depends(get_admin_user)` $\rightarrow$ `Depends(get_current_user)` $\rightarrow$ `Depends(oauth2_scheme)`) to output `components.securitySchemes` in `/openapi.json`, enabling interactive auth testing in Swagger UI (`/docs`).
 3. **HTTPException Status Code Preservation**:
