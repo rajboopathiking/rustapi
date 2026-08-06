@@ -575,22 +575,12 @@ const ui = SwaggerUIBundle({
     "deepLinking": true,
     "showExtensions": true,
     "showCommonExtensions": true,
+    "persistAuthorization": true,
     oauth2RedirectUrl: window.location.origin + '/docs/oauth2-redirect',
     presets: [
         SwaggerUIBundle.presets.apis,
         SwaggerUIBundle.SwaggerUIStandalonePreset
     ],
-})
-ui.initOAuth({
-    clientId: "your-client-id",
-    clientSecret: "your-client-secret-if-required",
-    realm: "your-realms",
-    appName: "your-app-name",
-    scopeSeparator: " ",
-    scopes: "",
-    additionalQueryStringParams: {},
-    useBasicAuthenticationWithAccessCodeGrant: false,
-    usePkceWithAuthorizationCodeGrant: false
 });
 </script>
 </body>
@@ -1316,13 +1306,18 @@ def _schema_from_signature(func):
         let segments = parse_pattern(&path);
         let entry = NativeRouteEntry {
             method: method.to_uppercase(),
-            _original_path: path,
+            _original_path: path.clone(),
             segments,
             body,
             status_code,
             content_type: content_type.to_string(),
         };
-        self.native_routes.lock().unwrap().push(entry);
+        let mut guard = self.native_routes.lock().unwrap();
+        if let Some(existing) = guard.iter_mut().find(|r| r.method == entry.method && r._original_path == entry._original_path) {
+            *existing = entry;
+        } else {
+            guard.push(entry);
+        }
     }
 
     #[pyo3(signature = (method, path, query_string, headers, body))]

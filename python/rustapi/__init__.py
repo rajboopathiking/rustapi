@@ -1,4 +1,6 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
+import inspect
+import json as _json
 from .status import status
 from ._rustapi import (
     Engine,
@@ -48,6 +50,13 @@ class FastAPI(Engine):
         docs_url: Optional[str] = "/docs",
         redoc_url: Optional[str] = "/redoc",
         swagger_ui_oauth2_redirect_url: Optional[str] = "/docs/oauth2-redirect",
+        swagger_ui_parameters: Optional[Dict[str, Any]] = None,
+        swagger_ui_init_oauth: Optional[Dict[str, Any]] = None,
+        servers: Optional[List[Dict[str, Any]]] = None,
+        tags: Optional[List[Dict[str, Any]]] = None,
+        terms_of_service: Optional[str] = None,
+        contact: Optional[Dict[str, Any]] = None,
+        license_info: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ):
         super().__init__()
@@ -58,12 +67,461 @@ class FastAPI(Engine):
         self.docs_url = docs_url
         self.redoc_url = redoc_url
         self.swagger_ui_oauth2_redirect_url = swagger_ui_oauth2_redirect_url
+        self.swagger_ui_parameters = swagger_ui_parameters
+        self.swagger_ui_init_oauth = swagger_ui_init_oauth
+        self.servers = servers
+        self.openapi_tags = tags
+        self.terms_of_service = terms_of_service
+        self.contact = contact
+        self.license_info = license_info
         self.exception_handlers: Dict[Any, Any] = {}
         self.middlewares: list = []
+        # Route metadata for OpenAPI generation: list of (method, path, handler, tags, kwargs)
+        self._route_metadata: List[Tuple[str, str, Any, List[str], Dict[str, Any]]] = []
+        self._openapi_schema: Optional[Dict[str, Any]] = None
+        self.dependency_overrides: Dict[Any, Any] = {}
 
     def add_middleware(self, middleware_cls: type, **kwargs: Any):
         """Add middleware (such as CORSMiddleware) to application configuration."""
         self.middlewares.append((middleware_cls, kwargs))
+
+    def include_router(self, router: 'APIRouter', prefix: str = "", tags: Optional[List[str]] = None, **kwargs: Any) -> None:
+        """Include an APIRouter and capture route metadata for OpenAPI generation."""
+        # Call the parent Rust Engine include_router to register routes
+        super().include_router(router, prefix, tags=tags, **kwargs)
+
+        # Capture route metadata for OpenAPI generation
+        router_prefix = getattr(router, 'prefix', '')
+        router_tags = getattr(router, 'tags', []) + (tags or [])
+        router_deps = getattr(router, 'dependencies', [])
+
+        for route_entry in getattr(router, 'routes', []):
+            if len(route_entry) >= 5:
+                method, sub_path, handler, response_model, route_kwargs = route_entry
+            elif len(route_entry) >= 3:
+                method, sub_path, handler = route_entry[0], route_entry[1], route_entry[2]
+                response_model = route_entry[3] if len(route_entry) > 3 else None
+                route_kwargs = route_entry[4] if len(route_entry) > 4 else {}
+            else:
+                continue
+
+            full_path = f"{prefix}{router_prefix}{sub_path}".replace("//", "/")
+            if not full_path.startswith("/"):
+                full_path = f"/{full_path}"
+
+            # Merge tags from router and route
+            route_tags = list(dict.fromkeys(
+                router_tags + (route_kwargs.get('tags', []) if route_kwargs else [])
+            ))
+            # Merge dependencies from router and route
+            deps = list(router_deps) + (route_kwargs.get('dependencies', []) if route_kwargs else [])
+            merged_kwargs = dict(route_kwargs or {})
+            merged_kwargs['dependencies'] = deps
+            merged_kwargs['response_model'] = response_model
+
+            self._route_metadata.append((method, full_path, handler, route_tags, merged_kwargs))
+
+        # Clear cached OpenAPI schema since routes changed
+        self._openapi_schema = None
+
+    @staticmethod
+    def _detect_security_schemes_from_handler(handler: Any, _visited: set | None = None) -> List[Tuple[str, Dict[str, Any]]]:
+        """Inspect a handler's signature for security dependencies (HTTPBearer, etc.).
+
+        Recursively traverses the dependency chain to find security schemes
+        at any depth (e.g., route → get_admin_user → get_current_user → HTTPBearer).
+        """
+        from .depends import Depends
+        from .security.base import SecurityBase
+        schemes: List[Tuple[str, Dict[str, Any]]] = []
+
+        if _visited is None:
+            _visited = set()
+
+        handler_id = id(handler)
+        if handler_id in _visited:
+            return schemes
+        _visited.add(handler_id)
+
+        try:
+            sig = inspect.signature(handler)
+        except (ValueError, TypeError):
+            return schemes
+
+        for pname, param in sig.parameters.items():
+            default = param.default
+            dep_func = None
+
+            if isinstance(default, Depends):
+                dep_func = default.dependency
+            elif isinstance(default, SecurityBase):
+                dep_func = default
+
+            if dep_func is None:
+                continue
+
+            # Check if dep_func itself is a security scheme
+            if isinstance(dep_func, SecurityBase):
+                scheme_info = FastAPI._security_base_to_openapi(dep_func)
+                if scheme_info:
+                    schemes.append(scheme_info)
+                continue
+
+            # Recursively inspect callable dependencies for security schemes
+            if callable(dep_func):
+                sub_schemes = FastAPI._detect_security_schemes_from_handler(dep_func, _visited)
+                schemes.extend(sub_schemes)
+
+        return schemes
+
+    @staticmethod
+    def _security_base_to_openapi(sec: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Convert a SecurityBase instance to an OpenAPI securityScheme entry."""
+        scheme_name = getattr(sec, 'scheme_name', None) or sec.__class__.__name__
+        cls_name = sec.__class__.__name__
+
+        if cls_name == 'HTTPBearer':
+            scheme_def: Dict[str, Any] = {"type": "http", "scheme": "bearer"}
+            bearer_fmt = getattr(sec, 'bearerFormat', None)
+            if bearer_fmt:
+                scheme_def["bearerFormat"] = bearer_fmt
+            desc = getattr(sec, 'description', None)
+            if desc:
+                scheme_def["description"] = desc
+            return (scheme_name, scheme_def)
+        elif cls_name == 'HTTPBasic':
+            return (scheme_name, {"type": "http", "scheme": "basic"})
+        elif cls_name == 'HTTPDigest':
+            return (scheme_name, {"type": "http", "scheme": "digest"})
+        elif cls_name in ('APIKeyHeader', 'APIKeyQuery', 'APIKeyCookie'):
+            in_loc = {'APIKeyHeader': 'header', 'APIKeyQuery': 'query', 'APIKeyCookie': 'cookie'}[cls_name]
+            name = getattr(sec, 'name', 'api_key')
+            return (scheme_name, {"type": "apiKey", "name": name, "in": in_loc})
+        elif cls_name == 'OAuth2PasswordBearer':
+            token_url = getattr(sec, 'tokenUrl', '/token')
+            return (scheme_name, {
+                "type": "oauth2",
+                "flows": {"password": {"tokenUrl": token_url, "scopes": {}}}
+            })
+        elif cls_name == 'OAuth2AuthorizationCodeBearer':
+            auth_url = getattr(sec, 'authorizationUrl', '')
+            token_url = getattr(sec, 'tokenUrl', '')
+            return (scheme_name, {
+                "type": "oauth2",
+                "flows": {"authorizationCode": {"authorizationUrl": auth_url, "tokenUrl": token_url, "scopes": {}}}
+            })
+        elif cls_name == 'OpenIdConnect':
+            openid_url = getattr(sec, 'openIdConnectUrl', '')
+            return (scheme_name, {"type": "openIdConnect", "openIdConnectUrl": openid_url})
+
+        return None
+
+    def openapi(self) -> Dict[str, Any]:
+        """Generate OpenAPI 3.0.0 specification with security schemes."""
+        if self._openapi_schema:
+            return self._openapi_schema
+
+        info: Dict[str, Any] = {
+            "title": self.title,
+            "version": self.version,
+        }
+        if self.description:
+            info["description"] = self.description
+        if self.terms_of_service:
+            info["termsOfService"] = self.terms_of_service
+        if self.contact:
+            info["contact"] = self.contact
+        if self.license_info:
+            info["license"] = self.license_info
+
+        schema: Dict[str, Any] = {
+            "openapi": "3.0.0",
+            "info": info,
+            "paths": {},
+        }
+
+        if self.servers:
+            schema["servers"] = self.servers
+        if self.openapi_tags:
+            schema["tags"] = self.openapi_tags
+
+        security_schemes: Dict[str, Dict[str, Any]] = {}
+        paths: Dict[str, Dict[str, Any]] = {}
+
+        metadata_routes = list(self._route_metadata)
+        registered_keys = {(m.lower(), p) for m, p, _, _, _ in metadata_routes}
+
+        try:
+            for r in self.routes:
+                for m in r.methods:
+                    m_lower = m.lower()
+                    if (m_lower, r.path) not in registered_keys:
+                        kwargs = {
+                            'summary': r.summary,
+                            'description': r.description,
+                            'dependencies': r.dependencies,
+                            'tags': r.tags,
+                        }
+                        metadata_routes.append((m, r.path, r.endpoint, r.tags, kwargs))
+                        registered_keys.add((m_lower, r.path))
+        except Exception:
+            pass
+
+        for method, path, handler, tags, kwargs in metadata_routes:
+            method_lower = method.lower()
+            if method_lower == 'ws':
+                continue
+
+            # Build operation object
+            handler_name = getattr(handler, '__name__', 'handler')
+            operation: Dict[str, Any] = {
+                "summary": kwargs.get('summary') or handler_name.replace('_', ' ').title(),
+                "operationId": f"{handler_name}_{path.replace('/', '_').strip('_')}_{method_lower}",
+                "responses": kwargs.get('responses') or {
+                    "200": {"description": "Successful Response"},
+                    "422": {"description": "Validation Error"},
+                },
+            }
+
+            if kwargs.get('description'):
+                operation["description"] = kwargs['description']
+            elif getattr(handler, '__doc__', None):
+                operation["description"] = handler.__doc__.strip()
+
+            if tags:
+                operation["tags"] = tags
+
+            if kwargs.get('deprecated'):
+                operation["deprecated"] = True
+
+            # Parse path parameters
+            import re
+            path_params = re.findall(r'\{(\w+)\}', path)
+            parameters: List[Dict[str, Any]] = []
+            for pp in path_params:
+                parameters.append({
+                    "name": pp,
+                    "in": "path",
+                    "required": True,
+                    "schema": {"type": "string"},
+                })
+
+            # Inspect handler signature for query parameters
+            try:
+                sig = inspect.signature(handler)
+                skip_params = {'self', 'cls', 'request', 'req', 'session', 'db',
+                               'current_user', 'token_auth', 'return'}
+                for pname, param in sig.parameters.items():
+                    if pname in skip_params:
+                        continue
+                    if pname in path_params:
+                        continue
+                    from .depends import Depends as _Dep
+                    if isinstance(param.default, _Dep):
+                        continue
+                    from .security.base import SecurityBase as _SB
+                    if isinstance(param.default, _SB):
+                        continue
+
+                    p_schema: Dict[str, Any] = {"type": "string"}
+                    ann = param.annotation
+                    if ann is not inspect.Parameter.empty:
+                        if ann is int:
+                            p_schema = {"type": "integer"}
+                        elif ann is float:
+                            p_schema = {"type": "number"}
+                        elif ann is bool:
+                            p_schema = {"type": "boolean"}
+
+                    p_entry: Dict[str, Any] = {
+                        "name": pname,
+                        "in": "query",
+                        "required": param.default is inspect.Parameter.empty,
+                        "schema": p_schema,
+                    }
+                    parameters.append(p_entry)
+            except (ValueError, TypeError):
+                pass
+
+            if parameters:
+                operation["parameters"] = parameters
+
+            # Request body for mutation methods
+            if method_lower in ('post', 'put', 'patch'):
+                if 'upload' in path.lower() or 'file' in path.lower():
+                    operation["requestBody"] = {
+                        "required": True,
+                        "content": {
+                            "multipart/form-data": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "file": {"type": "string", "format": "binary"}
+                                    }
+                                }
+                            }
+                        },
+                    }
+                else:
+                    operation["requestBody"] = {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"type": "object"}
+                            }
+                        },
+                    }
+
+            # Detect security from handler and its dependency chain
+            handler_schemes = self._detect_security_schemes_from_handler(handler)
+
+            # Also detect from explicit router-level dependencies
+            for dep in kwargs.get('dependencies', []):
+                from .depends import Depends as _Dep
+                dep_func = dep.dependency if isinstance(dep, _Dep) else dep
+                from .security.base import SecurityBase as _SB
+                if isinstance(dep_func, _SB):
+                    si = self._security_base_to_openapi(dep_func)
+                    if si:
+                        handler_schemes.append(si)
+
+            if handler_schemes:
+                op_security: List[Dict[str, List[str]]] = []
+                for sname, sdef in handler_schemes:
+                    security_schemes[sname] = sdef
+                    if {sname: []} not in op_security:
+                        op_security.append({sname: []})
+                operation["security"] = op_security
+
+            # Add to paths
+            if path not in paths:
+                paths[path] = {}
+            paths[path][method_lower] = operation
+
+        schema["paths"] = paths
+
+        # Add security schemes to components
+        if security_schemes:
+            schema["components"] = {"securitySchemes": security_schemes}
+
+        self._openapi_schema = schema
+
+        # Register native routes so Rust Tokio/Hyper server serves them natively
+        if self.openapi_url:
+            self.add_native_route(
+                self.openapi_url,
+                _json.dumps(schema, ensure_ascii=False),
+                method="GET",
+                status_code=200,
+                content_type="application/json",
+            )
+        if self.docs_url:
+            self.add_native_route(
+                self.docs_url,
+                self._get_swagger_ui_html(),
+                method="GET",
+                status_code=200,
+                content_type="text/html; charset=utf-8",
+            )
+        if self.redoc_url:
+            self.add_native_route(
+                self.redoc_url,
+                self._get_redoc_html(),
+                method="GET",
+                status_code=200,
+                content_type="text/html; charset=utf-8",
+            )
+        if self.swagger_ui_oauth2_redirect_url:
+            from .openapi.docs import get_swagger_ui_oauth2_redirect_html
+            redirect_resp = get_swagger_ui_oauth2_redirect_html()
+            redirect_html = getattr(redirect_resp, 'content', str(redirect_resp))
+            if isinstance(redirect_html, bytes):
+                redirect_html = redirect_html.decode('utf-8')
+            self.add_native_route(
+                self.swagger_ui_oauth2_redirect_url,
+                redirect_html,
+                method="GET",
+                status_code=200,
+                content_type="text/html; charset=utf-8",
+            )
+
+        return schema
+
+    def run(self, host: str = "127.0.0.1", port: int = 8000, reload: bool = False, workers: int = 1):
+        """Run application with native Rust Tokio/Hyper server."""
+        self.openapi()
+        super().run(host=host, port=port, reload=reload, workers=workers)
+
+    def _get_swagger_ui_html(self) -> str:
+        """Generate Swagger UI HTML with Authorize button support."""
+        params: Dict[str, Any] = {
+            "dom_id": "#swagger-ui",
+            "layout": "BaseLayout",
+            "deepLinking": True,
+            "showExtensions": True,
+            "showCommonExtensions": True,
+            "persistAuthorization": True,
+            "filter": True,
+        }
+        if self.swagger_ui_parameters:
+            params.update(self.swagger_ui_parameters)
+
+        params_js = ", ".join(
+            f"{k}: {_json.dumps(v)}" for k, v in params.items()
+        )
+
+        oauth_init = ""
+        if self.swagger_ui_init_oauth:
+            oauth_init = f"ui.initOAuth({_json.dumps(self.swagger_ui_init_oauth)})"
+
+        oauth2_redirect = ""
+        if self.swagger_ui_oauth2_redirect_url:
+            oauth2_redirect = f"oauth2RedirectUrl: window.location.origin + '{self.swagger_ui_oauth2_redirect_url}',"
+
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{self.title} - Swagger UI</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css" />
+    <link rel="icon" type="image/png" href="https://fastapi.tiangolo.com/img/favicon.png" />
+</head>
+<body>
+    <div id="swagger-ui"></div>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+    const ui = SwaggerUIBundle({{
+        url: "{self.openapi_url}",
+        {oauth2_redirect}
+        {params_js},
+        presets: [
+            SwaggerUIBundle.presets.apis,
+            SwaggerUIBundle.SwaggerUIStandalonePreset
+        ],
+    }})
+    {oauth_init}
+    </script>
+</body>
+</html>"""
+
+    def _get_redoc_html(self) -> str:
+        """Generate ReDoc HTML."""
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{self.title} - ReDoc</title>
+    <link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet">
+    <link rel="icon" type="image/png" href="https://fastapi.tiangolo.com/img/favicon.png" />
+    <style>body {{ margin: 0; padding: 0; }}</style>
+</head>
+<body>
+    <redoc spec-url="{self.openapi_url}"></redoc>
+    <script src="https://cdn.jsdelivr.net/npm/redoc@2/bundles/redoc.standalone.js"></script>
+</body>
+</html>"""
 
     async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any):
         """ASGI 3.0 interface implementation for ASGITransport, TestClient, uvicorn, and pytest."""
@@ -95,6 +553,61 @@ class FastAPI(Engine):
         path = scope.get("path", "/")
         query_string = scope.get("query_string", b"").decode("latin1")
         headers = {k.decode("latin1").lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
+
+        # Intercept OpenAPI/Swagger/ReDoc docs endpoints at Python level
+        # to serve proper schemas with security schemes and full Swagger UI
+        if method == "GET" and self._route_metadata:
+            if path == self.openapi_url:
+                openapi_spec = self.openapi()
+                response_body = json.dumps(openapi_spec, ensure_ascii=False)
+                resp_headers = {"content-type": "application/json; charset=utf-8"}
+                # Drain the body
+                while True:
+                    msg = await receive()
+                    if msg["type"] == "http.request" and not msg.get("more_body", False):
+                        break
+                encoded_headers = [(k.encode("latin1"), v.encode("latin1")) for k, v in resp_headers.items()]
+                await send({"type": "http.response.start", "status": 200, "headers": encoded_headers})
+                await send({"type": "http.response.body", "body": response_body.encode("utf-8")})
+                return
+
+            if path == self.docs_url:
+                response_body = self._get_swagger_ui_html()
+                resp_headers = {"content-type": "text/html; charset=utf-8"}
+                while True:
+                    msg = await receive()
+                    if msg["type"] == "http.request" and not msg.get("more_body", False):
+                        break
+                encoded_headers = [(k.encode("latin1"), v.encode("latin1")) for k, v in resp_headers.items()]
+                await send({"type": "http.response.start", "status": 200, "headers": encoded_headers})
+                await send({"type": "http.response.body", "body": response_body.encode("utf-8")})
+                return
+
+            if self.redoc_url and path == self.redoc_url:
+                response_body = self._get_redoc_html()
+                resp_headers = {"content-type": "text/html; charset=utf-8"}
+                while True:
+                    msg = await receive()
+                    if msg["type"] == "http.request" and not msg.get("more_body", False):
+                        break
+                encoded_headers = [(k.encode("latin1"), v.encode("latin1")) for k, v in resp_headers.items()]
+                await send({"type": "http.response.start", "status": 200, "headers": encoded_headers})
+                await send({"type": "http.response.body", "body": response_body.encode("utf-8")})
+                return
+
+            if self.swagger_ui_oauth2_redirect_url and path == self.swagger_ui_oauth2_redirect_url:
+                from .openapi.docs import get_swagger_ui_oauth2_redirect_html
+                redirect_resp = get_swagger_ui_oauth2_redirect_html()
+                response_body = getattr(redirect_resp, 'content', str(redirect_resp))
+                resp_headers = {"content-type": "text/html; charset=utf-8"}
+                while True:
+                    msg = await receive()
+                    if msg["type"] == "http.request" and not msg.get("more_body", False):
+                        break
+                encoded_headers = [(k.encode("latin1"), v.encode("latin1")) for k, v in resp_headers.items()]
+                await send({"type": "http.response.start", "status": 200, "headers": encoded_headers})
+                await send({"type": "http.response.body", "body": response_body.encode("utf-8") if isinstance(response_body, str) else response_body})
+                return
 
         body_bytes = bytearray()
         while True:
