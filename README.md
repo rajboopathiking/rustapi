@@ -2,6 +2,7 @@
 
 ![RustAPI Logo](https://raw.githubusercontent.com/rajboopathiking/rustapi/master/pyrustapi-logo.png)
 
+
 **FastAPI-style Python Web Framework backed by a Rust (Tokio / Hyper) Engine — with embedded Rust Database Streaming, JWT & Argon2 Primitives, Tier 3 Rust-Native Routes, and a built-in MCP Server.**
 
 [![PyPI](https://img.shields.io/pypi/v/pyrustapi.svg)](https://pypi.org/project/pyrustapi/)
