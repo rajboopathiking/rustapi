@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RustAPI — Getting Started & Installation Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0d10;
+    --surface-1: #13171f;
+    --surface-2: #1c222d;
+    --surface-3: #252d3c;
+    --border: #2e384a;
+    --border-light: #3a475d;
+    --text: #f0f4f8;
+    --text-muted: #94a3b8;
+    --text-dim: #64748b;
+    --rust: #f95738;
+    --rust-hover: #e04324;
+    --rust-dim: rgba(249, 87, 56, 0.15);
+    --python: #38bdf8;
+    --python-dim: rgba(56, 189, 248, 0.15);
+    --success: #10b981;
+    --radius: 8px;
+    --radius-lg: 12px;
+    --font-display: 'Space Grotesk', sans-serif;
+    --font-body: 'Inter', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--font-body); font-size: 15px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--rust); text-decoration: none; transition: color 0.15s; }
+  a:hover { color: var(--rust-hover); text-decoration: underline; }
+  code, pre { font-family: var(--font-mono); }
+  ::selection { background: var(--rust); color: #fff; }
+
+  /* Navigation Bar */
+  .navbar {
+    position: sticky; top: 0; z-index: 100; background: rgba(11, 13, 16, 0.95);
+    backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    padding: 14px 28px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .nav-brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-weight: 700; font-size: 1.25rem; }
+  .nav-brand img { height: 38px; width: auto; border-radius: 6px; }
+  .nav-links { display: flex; gap: 20px; align-items: center; }
+  .nav-links a {
+    color: var(--text-muted); font-size: 0.9rem; font-weight: 500; padding: 6px 12px;
+    border-radius: var(--radius); transition: all 0.15s ease;
+  }
+  .nav-links a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
+  .nav-links a.active { color: var(--rust); background: var(--rust-dim); font-weight: 600; }
+
+  /* Shell Layout */
+  .shell { display: flex; max-width: 1400px; margin: 0 auto; min-height: calc(100vh - 67px); }
+  .sidebar {
+    width: 260px; flex-shrink: 0; position: sticky; top: 67px; align-self: flex-start;
+    height: calc(100vh - 67px); overflow-y: auto; padding: 28px 20px; border-right: 1px solid var(--border);
+    background: rgba(11, 13, 16, 0.5);
+  }
+  .sidebar nav { display: flex; flex-direction: column; gap: 4px; }
+  .sidebar nav a {
+    color: var(--text-muted); font-size: 0.88rem; padding: 8px 12px; border-radius: var(--radius);
+    transition: all 0.15s ease; font-weight: 500;
+  }
+  .sidebar nav a:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
+  .sidebar nav a.active { background: var(--rust-dim); color: var(--rust); font-weight: 600; }
+  .sidebar-category {
+    font-family: var(--font-mono); font-size: 0.68rem; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--text-dim); margin: 16px 0 6px 12px;
+  }
+
+  .content { flex: 1; min-width: 0; padding: 0 56px 120px; }
+  .content section { padding-top: 56px; border-bottom: 1px solid var(--border); padding-bottom: 48px; }
+  .content section:last-of-type { border-bottom: none; }
+
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--rust); background: var(--rust-dim); padding: 4px 14px; border-radius: 20px;
+    display: inline-block; margin-bottom: 20px; border: 1px solid rgba(249, 87, 56, 0.3);
+  }
+
+  pre {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-lg);
+    padding: 20px 24px; overflow-x: auto; font-size: 0.88rem; line-height: 1.6; color: #e2e8f0;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);
+  }
+  code:not(pre code) { background: var(--surface-2); padding: 2px 7px; border-radius: 4px; font-size: 0.85em; color: var(--rust); border: 1px solid var(--border); }
+  .kw { color: #f472b6; font-weight: 600; }
+  .dec { color: var(--rust); font-weight: 600; }
+  .str { color: #a3e635; }
+  .com { color: var(--text-dim); font-style: italic; }
+  .num { color: #fbbf24; }
+
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 24px; margin: 16px 0; }
+  .card h3 { font-family: var(--font-display); font-size: 1.15rem; margin: 0 0 8px; font-weight: 600; color: #fff; }
+
+  footer { margin-top: 80px; padding: 40px 0; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.85rem; text-align: center; }
+
+  @media (max-width: 900px) {
+    .shell { display: block; }
+    .sidebar { position: relative; width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); top: 0; }
+    .content { padding: 0 20px 80px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="navbar">
+  <div class="nav-brand">
+    <img src="pyrustapi-logo%20(1).png" alt="RustAPI Logo" />
+    <span>RustAPI ⚡</span>
+  </div>
+  <nav class="nav-links">
+    <a href="index.html">Home</a>
+    <a href="getting-started.html" class="active">Getting Started</a>
+    <a href="benchmarks.html">Benchmarks Report</a>
+    <a href="database.html">Database Engine</a>
+    <a href="security-power-modules.html">Security Modules</a>
+    <a href="mcp-server.html">MCP AI Protocol</a>
+    <a href="api-reference.html">API Reference</a>
+  </nav>
+</header>
+
+<div class="shell">
+  <aside class="sidebar">
+    <nav>
+      <div class="sidebar-category">Getting Started</div>
+      <a href="#install" class="active">Installation</a>
+      <a href="#first-app">First Application</a>
+      <a href="#request-handling">Handling Requests</a>
+      <a href="#validation">Pydantic Validation</a>
+      <a href="#reloading">Auto-Reload Mode</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+
+    <section id="install">
+      <span class="eyebrow">Quick Setup</span>
+      <h1 style="font-family: var(--font-display); font-size: 2.6rem; margin-top: 10px;">🚀 Installation &amp; Setup</h1>
+      <p style="color: var(--text-muted); font-size: 1.1rem;">
+        RustAPI is published as a pre-compiled wheel package on PyPI (`pyrustapi`) with zero Rust toolchain required for end users.
+      </p>
+
+      <h3>Installing via Pip</h3>
+      <pre><code>pip install pyrustapi pydantic</code></pre>
+
+      <h3>Building from Source (Optional / Development)</h3>
+      <pre><code>git clone https://github.com/rajboopathiking/rustapi.git
+cd rustapi
+pip install maturin
+maturin develop --release</code></pre>
+    </section>
+
+    <section id="first-app">
+      <span class="eyebrow">Your First API</span>
+      <h2>💻 Writing Your First Application</h2>
+
+      <p>Create a file named <code>main.py</code>:</p>
+
+      <pre><code><span class="kw">import</span> rustapi
+<span class="kw">from</span> pydantic <span class="kw">import</span> BaseModel
+
+<span class="com"># Initialize the RustAPI Engine (Tokio runtime + Hyper HTTP server)</span>
+app = rustapi.Engine()
+
+<span class="kw">class</span> Item(BaseModel):
+    name: str
+    price: float
+    is_offer: bool = None
+
+<span class="dec">@app.get</span>(<span class="str">"/"</span>)
+<span class="kw">def</span> read_root():
+    <span class="kw">return</span> {<span class="str">"Hello"</span>: <span class="str">"World from RustAPI"</span>}
+
+<span class="dec">@app.get</span>(<span class="str">"/items/{item_id}"</span>)
+<span class="kw">def</span> read_item(item_id: int, q: str = None):
+    <span class="kw">return</span> {<span class="str">"item_id"</span>: item_id, <span class="str">"q"</span>: q}
+
+<span class="dec">@app.post</span>(<span class="str">"/items"</span>)
+<span class="kw">def</span> create_item(item: Item):
+    <span class="kw">return</span> {<span class="str">"item_name"</span>: item.name, <span class="str">"item_price"</span>: item.price}
+
+<span class="kw">if</span> __name__ == <span class="str">"__main__"</span>:
+    app.run(host=<span class="str">"127.0.0.1"</span>, port=<span class="num">8000</span>)</code></pre>
+
+      <p>Run the application:</p>
+      <pre><code>python main.py</code></pre>
+      <p>Open <code>http://127.0.0.1:8000/docs</code> (Swagger UI) or <code>http://127.0.0.1:8000/redoc</code> (ReDoc) in your browser!</p>
+    </section>
+
+    <section id="request-handling">
+      <span class="eyebrow">Ergonomics</span>
+      <h2>📥 Path, Query, Header &amp; Body Extraction</h2>
+
+      <div class="card">
+        <h3>Automatic Path &amp; Query Coercion</h3>
+        <p>RustAPI parses URL path and query parameters natively in Rust, yielding structured <code>422 Unprocessable Entity</code> responses if type constraints fail.</p>
+      </div>
+
+      <pre><code><span class="dec">@app.get</span>(<span class="str">"/search"</span>)
+<span class="kw">def</span> search(query: str, page: int = <span class="num">1</span>, limit: int = <span class="num">20</span>):
+    <span class="kw">return</span> {<span class="str">"query"</span>: query, <span class="str">"page"</span>: page, <span class="str">"limit"</span>: limit}</code></pre>
+    </section>
+
+    <section id="reloading">
+      <span class="eyebrow">Developer Experience</span>
+      <h2>🔄 Hot Auto-Reload Mode</h2>
+      <p>Enable auto-reload during development to restart the server on file changes:</p>
+      
+      <pre><code><span class="kw">if</span> __name__ == <span class="str">"__main__"</span>:
+    app.run(host=<span class="str">"127.0.0.1"</span>, port=<span class="num">8000</span>, reload=<span class="kw">True</span>)</code></pre>
+    </section>
+
+    <footer>
+      <p>RustAPI v0.3.3 — Built with Tokio, Hyper, PyO3, and sqlx. MIT Licensed.</p>
+    </footer>
+
+  </main>
+</div>
+
+</body>
+</html>
