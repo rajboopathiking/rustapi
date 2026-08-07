@@ -2389,12 +2389,16 @@ async fn handle_route(
 
             // Enforce required parameters presence.
             for req_p in &required_params_c {
-                if !path_params_c.contains_key(req_p) && !query_params_c.contains_key(req_p) {
+                if !path_params_c.contains_key(req_p)
+                    && !query_params_c.contains_key(req_p)
+                    && !form_c.contains_key(req_p)
+                    && !files_c.contains_key(req_p)
+                {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!("422: Missing required parameter '{}'", req_p)));
                 }
             }
 
-            // Type-coercing parameter binder (path + query).
+            // Type-coercing parameter binder (path + query + form).
             let apply_params = |params: &HashMap<String, String>| -> Result<(), String> {
                 for (k, v) in params {
                     if !param_names_c.contains(k) { continue; }
@@ -2425,6 +2429,23 @@ async fn handle_route(
 
             if let Err(e) = apply_params(&path_params_c)  { return Err(pyo3::exceptions::PyValueError::new_err(format!("422: {}", e))); }
             if let Err(e) = apply_params(&query_params_c) { return Err(pyo3::exceptions::PyValueError::new_err(format!("422: {}", e))); }
+            if let Err(e) = apply_params(&form_c)         { return Err(pyo3::exceptions::PyValueError::new_err(format!("422: {}", e))); }
+
+            for (k, v_list) in &files_c {
+                if param_names_c.contains(k) {
+                    if v_list.len() == 1 {
+                        let py_file = Py::new(py, v_list[0].clone())?;
+                        kwargs.set_item(k, py_file)?;
+                    } else if !v_list.is_empty() {
+                        let py_list = pyo3::types::PyList::empty_bound(py);
+                        for f in v_list {
+                            let py_file = Py::new(py, f.clone())?;
+                            py_list.append(py_file)?;
+                        }
+                        kwargs.set_item(k, py_list)?;
+                    }
+                }
+            }
 
             for (k, v) in resolved_args { kwargs.set_item(k, v)?; }
 

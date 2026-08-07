@@ -167,3 +167,33 @@ def test_custom_openapi_route():
     data = r.json()
     assert data["info"]["title"] == "RustAPI Custom Upload API"
     assert "/upload/multiple" in data["paths"]
+
+
+@app.post("/upload/form_and_file")
+def upload_form_and_file(
+    label: str = rustapi.Form(...), file: rustapi.UploadFile = rustapi.File(...)
+):
+    content = file.read()
+    if not isinstance(content, bytes):
+        content = bytes(content)
+    return {
+        "label": label,
+        "label_is_str": isinstance(label, str),
+        "filename": file.filename,
+        "file_is_upload_file": isinstance(file, rustapi.UploadFile),
+        "size": len(content),
+    }
+
+
+def test_fastapi_form_and_file_parameter_binding():
+    files = {"file": ("resume.pdf", b"PDF bytes content", "application/pdf")}
+    data = {"label": "My Resume"}
+    r = requests.post(f"{BASE}/upload/form_and_file", data=data, files=files)
+    assert r.status_code == 200
+    res = r.json()
+    assert res["label"] == "My Resume"
+    assert res["label_is_str"] is True
+    assert res["filename"] == "resume.pdf"
+    assert res["file_is_upload_file"] is True
+    assert res["size"] == len(b"PDF bytes content")
+

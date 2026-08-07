@@ -62,6 +62,7 @@
 
 Detailed documentation is available in the [`docs/`](docs/) directory and project reference:
 - [📖 Getting Started & Core Routing](https://github.com/rajboopathiking/rustapi/blob/master/docs/md/getting_started.md)
+- [🔒 Security, Authentication & JWT Guide](https://github.com/rajboopathiking/rustapi/blob/master/docs/md/security.md)
 - [📚 Complete API & Migration Guide](https://github.com/rajboopathiking/rustapi/blob/master/docs/md/docs.md)
 ---
 
