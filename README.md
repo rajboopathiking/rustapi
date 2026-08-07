@@ -1,6 +1,6 @@
 # RustAPI
 
-![RustAPI Logo](https://raw.githubusercontent.com/rajboopathiking/rustapi/master/pyrustapi-logo.png)
+![RustAPI Logo]([https://raw.githubusercontent.com/rajboopathiking/rustapi/master/pyrustapi-logo.png](https://github.com/rajboopathiking/rustapi/blob/master/pyrustapi-logo.png))
 
 
 **FastAPI-style Python Web Framework backed by a Rust (Tokio / Hyper) Engine — with embedded Rust Database Streaming, JWT & Argon2 Primitives, Tier 3 Rust-Native Routes, and a built-in MCP Server.**
