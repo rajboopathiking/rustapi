@@ -41,7 +41,44 @@ def get_openapi(
     if tags:
         output["tags"] = tags
 
-    components: Dict[str, Any] = {"schemas": {}, "securitySchemes": {}}
+    VALIDATION_ERROR_DEFINITION = {
+        "title": "ValidationError",
+        "type": "object",
+        "properties": {
+            "loc": {
+                "title": "Location",
+                "type": "array",
+                "items": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+            },
+            "msg": {"title": "Message", "type": "string"},
+            "type": {"title": "Error Type", "type": "string"},
+            "input": {"title": "Input"},
+            "ctx": {"title": "Context", "type": "object"},
+        },
+        "required": ["loc", "msg", "type"],
+    }
+
+    HTTP_VALIDATION_ERROR_DEFINITION = {
+        "title": "HTTPValidationError",
+        "type": "object",
+        "properties": {
+            "detail": {
+                "title": "Detail",
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/ValidationError"},
+            }
+        },
+        "type": "object",
+        "title": "HTTPValidationError",
+    }
+
+    components: Dict[str, Any] = {
+        "schemas": {
+            "ValidationError": VALIDATION_ERROR_DEFINITION,
+            "HTTPValidationError": HTTP_VALIDATION_ERROR_DEFINITION,
+        },
+        "securitySchemes": {},
+    }
 
     if security_schemes:
         components["securitySchemes"].update(security_schemes)

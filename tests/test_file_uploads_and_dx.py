@@ -197,3 +197,64 @@ def test_fastapi_form_and_file_parameter_binding():
     assert res["file_is_upload_file"] is True
     assert res["size"] == len(b"PDF bytes content")
 
+
+recent_uploads_store = []
+
+
+@app.post("/upload/recent_demo")
+def upload_recent_demo(req):
+    files = req.files.get("file", [])
+    if not files:
+        return {"error": "no file"}
+    doc = files[0]
+    content = doc.read()
+    item = {"filename": doc.filename, "size": len(content)}
+    recent_uploads_store.append(item)
+    return {"status": "ok", "uploaded": item}
+
+
+@app.get("/uploads/recent_demo")
+def get_recent_uploads_demo():
+    return {"recent": list(reversed(recent_uploads_store))}
+
+
+def test_recent_uploads_flow():
+    files = {"file": ("demo.txt", b"Recent upload test content", "text/plain")}
+    r1 = requests.post(f"{BASE}/upload/recent_demo", files=files)
+    assert r1.status_code == 200
+    assert r1.json()["uploaded"]["filename"] == "demo.txt"
+
+    r2 = requests.get(f"{BASE}/uploads/recent_demo")
+    assert r2.status_code == 200
+    res2 = r2.json()
+    assert len(res2["recent"]) >= 1
+    assert res2["recent"][0]["filename"] == "demo.txt"
+
+
+def test_openapi_upload_and_multi_file_schemas():
+    from typing import List
+    test_app = rustapi.FastAPI(title="Swagger UI Upload Spec Test")
+
+    @test_app.post("/upload/single")
+    def single_doc(document: rustapi.UploadFile = rustapi.File(...), desc: str = rustapi.Form("default")):
+        return {}
+
+    @test_app.post("/upload/multi")
+    def multi_docs(documents: List[rustapi.UploadFile] = rustapi.File(...)):
+        return {}
+
+    spec = test_app.openapi()
+    single_schema = spec["paths"]["/upload/single"]["post"]["requestBody"]["content"]["multipart/form-data"]["schema"]
+    assert single_schema["properties"]["document"] == {"type": "string", "format": "binary"}
+    assert single_schema["properties"]["desc"] == {"type": "string"}
+    assert "document" in single_schema["required"]
+
+    multi_schema = spec["paths"]["/upload/multi"]["post"]["requestBody"]["content"]["multipart/form-data"]["schema"]
+    assert multi_schema["properties"]["documents"] == {
+        "type": "array",
+        "items": {"type": "string", "format": "binary"},
+    }
+    assert "documents" in multi_schema["required"]
+
+
+
