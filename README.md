@@ -82,7 +82,6 @@ maturin develop --release
 # Run full test suite
 pytest tests/ -v
 ```
-
 PYPI Package
 
 ```bash
