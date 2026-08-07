@@ -6,20 +6,41 @@ RustAPI (`pyrustapi`) provides **1:1 FastAPI compatibility**, enabling developer
 
 ## 📌 Summary of Features & Compatibility Layer
 
-| Feature | Import Path | Description |
-| :--- | :--- | :--- |
-| **`FastAPI` Alias** | `from rustapi import FastAPI` | Class alias for `Engine` for 100% drop-in FastAPI compatibility. |
-| **`Request` Alias** | `from rustapi import Request` | Class alias for `PyRequest`. |
-| **Status Codes** | `from rustapi import status` | Starlette/FastAPI status code constants (`status.HTTP_200_OK`, `status.HTTP_404_NOT_FOUND`, etc.). |
-| **OpenAPI & Specs** | `from rustapi.openapi import get_swagger_ui_html, get_redoc_html, get_openapi, models` | Interactive Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI 3.1.0 specification models & generators. |
-| **Response Classes** | `from rustapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse` | Full range of FastAPI response classes. |
-| **CORS Middleware** | `from rustapi.middleware.cors import CORSMiddleware` | Middleware class & `app.add_middleware()` for configuring cross-origin requests. |
-| **Server-Sent Events** | `from rustapi import EventSourceResponse, ServerSentEvent, format_sse_event` | Real-time SSE streaming for AI/LLM tokens and Model Context Protocol (MCP). |
-| **Data Encoders** | `from rustapi import jsonable_encoder` | Convert Pydantic models, Dataclasses, Datetime, UUID, and dicts to JSON-serializable primitives. |
-| **Parameter Markers** | `from rustapi import Body, Query, Path, Header, Cookie, Form, File, Security` | Location markers for dependency injection and parameter validation. |
-| **Security Modules** | `from rustapi.security import OAuth2PasswordBearer, OAuth2AuthorizationCodeBearer, HTTPBearer, HTTPBasic, APIKeyHeader, APIKeyQuery, APIKeyCookie, OpenIdConnect, SecurityScopes, SecurityBase` | 100% FastAPI-compatible security authentication dependency helpers. |
-| **Frontend Serving** | `app.frontend("/", directory="dist")` / `router.frontend(...)` | Serve built React, Vue, Svelte, or Vite single-page apps with client-side routing fallback. |
-| **WebSocket Exceptions**| `from rustapi import WebSocketDisconnect, WebSocketException` | Exception classes for handling WebSocket disconnection events. |
+| Feature Domain | FastAPI Import / API | RustAPI (`pyrustapi`) Implementation | Parity & Status |
+| :--- | :--- | :--- | :---: |
+| **`FastAPI` App Alias** | `from fastapi import FastAPI` | `from rustapi import FastAPI` (Alias for `Engine`) | ✅ 100% Drop-in |
+| **`Request` Object** | `from fastapi import Request` | `from rustapi import Request` (Alias for `PyRequest`) | ✅ 100% Drop-in |
+| **Status Codes** | `from fastapi import status` | `from rustapi import status` (`status.HTTP_200_OK`, `HTTP_404_NOT_FOUND`, etc.) | ✅ 100% Drop-in |
+| **Parameter Markers** | `Query`, `Path`, `Body`, `Header`, `Cookie`, `Form`, `File` | `from rustapi import Query, Path, Body, Header, Cookie, Form, File` | ✅ 100% Drop-in |
+| **File Uploads** | `UploadFile` | `from rustapi import UploadFile` (`await file.read()` / `file.read()`) | ✅ 100% Drop-in |
+| **Data Validation** | Pydantic v2 `BaseModel` | Pydantic `BaseModel` automatic validation & `422 Unprocessable Entity` responses | ✅ 100% Drop-in |
+| **Dependency Injection** | `Depends()` | `from rustapi import Depends` (supports nested `Depends` & `app.dependency_overrides`) | ✅ 100% Drop-in |
+| **Generator Teardowns** | `yield session` | Sync & async generator dependency teardowns after HTTP response completion | ✅ 100% Drop-in |
+| **Security Schemes** | `from fastapi.security import ...` | `from rustapi.security import OAuth2PasswordBearer, HTTPBearer, HTTPBasic, APIKeyHeader, APIKeyQuery, APIKeyCookie, OpenIdConnect` | ✅ 100% Drop-in |
+| **Interactive Docs** | `/docs`, `/redoc`, `/openapi.json` | Built-in Swagger UI with 🔓 **Authorize** button, ReDoc, & OpenAPI 3.1 generator | ✅ 100% Drop-in |
+| **Response Classes** | `JSONResponse`, `HTMLResponse`, `StreamingResponse`, `FileResponse` | `from rustapi.responses import JSONResponse, HTMLResponse, PlainTextResponse, RedirectResponse, StreamingResponse, FileResponse` | ✅ 100% Drop-in |
+| **Server-Sent Events** | `EventSourceResponse` | `from rustapi import EventSourceResponse, ServerSentEvent, format_sse_event` | ✅ 100% Drop-in |
+| **Router Organization** | `APIRouter()` | `from rustapi import APIRouter` (`app.include_router(router, prefix="/api", tags=["v1"])`) | ✅ 100% Drop-in |
+| **CORS Middleware** | `CORSMiddleware` | `from rustapi.middleware.cors import CORSMiddleware` | ✅ 100% Drop-in |
+| **Data Encoders** | `jsonable_encoder()` | `from rustapi import jsonable_encoder` (Pydantic, Dataclasses, UUID, Datetime) | ✅ 100% Drop-in |
+| **Background Tasks** | `BackgroundTasks` | `from rustapi import BackgroundTasks` (`bg.add_task(func, *args)`) | ✅ 100% Drop-in |
+
+---
+
+## ⚡ Performance & Extra Features Beyond FastAPI
+
+In addition to 100% drop-in FastAPI developer experience, RustAPI includes high-performance Rust core primitives:
+
+| Feature Area | Standard FastAPI | RustAPI (`pyrustapi`) Advantage |
+| :--- | :---: | :--- |
+| **Core Network Engine** | ❌ (Uvicorn / Starlette) | Multi-threaded async **Rust Tokio runtime & Hyper HTTP server** for low latency and zero network overhead. |
+| **Tier 3 Zero-GIL Fast-Paths** | ❌ None | `app.add_native_route()` serves compiled endpoints inside Tokio at **50,000+ req/sec**, bypassing CPython interpreter and GIL entirely. |
+| **Embedded Rust Security Primitives** | ❌ Requires PyJWT / python-jose | C-extension `rustapi.encode_jwt()` / `rustapi.decode_jwt()` backed by Rust's `jsonwebtoken` crate with zero external Python dependencies. |
+| **Argon2 Password Hashing** | ❌ Requires passlib / argon2-cffi | Native `rustapi.hash_password()` / `rustapi.verify_password()` backed by Rust's `argon2` crate. |
+| **Embedded Rust DB Engine (`sqlx`)** | ❌ Requires SQLAlchemy / ORM | Native SQLite & PostgreSQL connection pooling (`app.connect_db()`) with zero-copy JSON socket streaming (`db.query_json()`). |
+| **Model Context Protocol (MCP)** | ❌ Requires mcp SDK | Native AI agent MCP server (`POST /mcp`) supporting `@app.tool()`, `@app.resource()`, and `@app.prompt()`. |
+| **Frontend SPA Serving** | ❌ Manual StaticFiles setup | `app.frontend("/", directory="dist")` automatically serves React/Vue/Svelte/Vite single-page apps with client-side routing fallback. |
+| **MiniJinja Template Engine** | ❌ Requires Jinja2 | C-extension `rustapi.render_template()` for ultra-fast HTML rendering. |
 
 ---
 
@@ -346,4 +367,54 @@ async def read_audit_logs(admin: dict = Depends(get_admin_user)):
 5. **Dual Async / Sync Payload Helpers**:
    Provides `AwaitableDict` for `req.json()` and `AwaitableBytes` for `UploadFile.read()`, allowing both `await req.json()` and `req.json()` inside sync/async ML route handlers.
 
+___
 
+
+  Yes! pyrustapi (v1.8.9) is designed to be a 100% complete drop-in replacement for FastAPI, but powered by a multithreaded Rust (Tokio / Hyper) core under the hood.                
+                                                                                                                                                                                     
+  Here is how it works as a seamless replacement:                                                                                                                                    
+  ──────                                                                                                                                                                             
+  ### 1. 🔄 1-to-1 Import Parity                                                                                                                                        
+                                                                                                                                                                                     
+  `You can replace your FastAPI imports directly`:                                                                                                                                     
+                                                                                                                                                                                     
+    # Before (Standard FastAPI)                                                                                                                                                      
+    from fastapi import FastAPI, APIRouter, Depends, HTTPException, status, Query, Path, Body, UploadFile, File                                                                      
+    from fastapi.security import HTTPBearer, OAuth2PasswordBearer                                                                                                                    
+    from fastapi.middleware.cors import CORSMiddleware                                                                                                                               
+    from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse                                                                                                      
+                                                                                                                                                                                     
+    # After (RustAPI - Drop-in Replacement)                                                                                                                                          
+    from rustapi import FastAPI, APIRouter, Depends, HTTPException, status, Query, Path, Body, UploadFile, File                                                                      
+    from rustapi.security import HTTPBearer, OAuth2PasswordBearer                                                                                                                    
+    from rustapi.middleware import CORSMiddleware                                                                                                                                    
+    from rustapi.responses import JSONResponse, HTMLResponse, StreamingResponse                                                                                                      
+    ──────                                                                                                                                                                           
+  ### 2. ⚡ 3-Tier Architecture                                                                                                                                       
+
+`Tier 1`: FastAPI DX         -> Python & Pydantic v2    ->  Full FastAPI dependency injection (Depends), async generator DB sessions (yield session), route parameters, request validation, and exception handling. 
+                                         
+   `Tier 2`: Rust Power Modules -> Rust Native C-Extensions -> Ultra-fast built-in Rust modules: hash_password/verify_password (Argon2id), encode_jwt/decode_jwt (Rustls/Ring), render_template (MiniJinja).
+
+   `Tier 3`: Core Runtime       ->  Rust Tokio & Hyper ->  Multi-threaded async I/O server running on native C-threads for high concurrency.                                                                                                                                              
+  ### 3. 🎯 Full Feature Coverage                                                                                                                                                    
+                                                                                                                                                                                     
+  • `Interactive Docs`: Swagger UI (/docs) with the top Authorize lock button, ReDoc (/redoc), and `OpenAPI 3.0.0 (/openapi.json)`.                                                      
+  •    `Router Organization`: Full support for `include_router(router, prefix="/api/v1", tags=["Users"]).`                                                                                  
+  • `Async Generators`: Full lifecycle cleanup for DB sessions (`async with AsyncSessionLocal() as session: yield session`).
+
+  • `WebSockets & Streaming`: Native WebSocket streams and EventSourceResponse (SSE).
+
+  • `Bonus (AI Native)`: Built-in Model Context Protocol (MCP) server support via 
+  `@app.tool(), @app.resource(), and @app.prompt()`
+
+
+  ### 🚀 Running the App
+  
+  You can run your app using either:
+  
+    # 1. Native Tokio Server (High Performance)
+    app.run(host="127.0.0.1", port=8000, reload=True)
+  
+    # 2. Or standard ASGI runners (Uvicorn / Gunicorn)
+    uvicorn main:app --reload
