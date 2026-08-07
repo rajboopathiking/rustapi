@@ -218,20 +218,21 @@
 
 <!-- Single-Page Application (SPA) Header Navigation -->
 <header class="navbar">
-  <div class="nav-brand" onclick="switchTab('overview')">
-    <img src="docs/pyrustapi-logo%20(1).png" alt="RustAPI Logo" />
-    <span>RustAPI ⚡</span>
+  <div class="nav-brand">
+    <a href="index.html" style="display: flex; align-items: center; gap: 10px; color: inherit; text-decoration: none;">
+      <img src="pyrustapi-logo%20(1).png" alt="RustAPI Logo" style="height: 38px; width: auto; border-radius: 6px;" />
+      <span>RustAPI ⚡</span>
+    </a>
   </div>
   <nav class="nav-links">
-    <button class="nav-tab active" data-tab="overview" onclick="switchTab('overview')">Home</button>
-    <button class="nav-tab" data-tab="getting-started" onclick="switchTab('getting-started')">Getting Started</button>
-    <a href="openapi-pydantic.html" style="color: var(--text-muted); font-size: 0.88rem; font-weight: 500; padding: 6px 12px; border-radius: var(--radius); text-decoration: none;">OpenAPI &amp; Schemas</a>
-    <button class="nav-tab" data-tab="benchmark-dashboard" onclick="switchTab('benchmark-dashboard')">Benchmark Dashboard ⚡</button>
-    <button class="nav-tab" data-tab="benchmarks" onclick="switchTab('benchmarks')">Benchmarks Report</button>
-    <button class="nav-tab" data-tab="database" onclick="switchTab('database')">Database Engine</button>
-    <button class="nav-tab" data-tab="security" onclick="switchTab('security')">Security Modules</button>
-    <button class="nav-tab" data-tab="mcp" onclick="switchTab('mcp')">MCP AI Protocol</button>
-    <button class="nav-tab" data-tab="api-reference" onclick="switchTab('api-reference')">API Reference</button>
+    <a href="index.html" class="active">Home</a>
+    <a href="getting-started.html">Getting Started</a>
+    <a href="openapi-pydantic.html">OpenAPI &amp; Schemas</a>
+    <a href="database.html">Database Engine</a>
+    <a href="security-power-modules.html">Security Modules</a>
+    <a href="mcp-server.html">MCP AI Protocol</a>
+    <a href="benchmarks.html">Benchmarks Report</a>
+    <a href="api-reference.html">API Reference</a>
   </nav>
 </header>
 
