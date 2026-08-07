@@ -88,7 +88,6 @@ PYPI Package
 ```bash
 pip install pyrustapi
 ```
-
 ---
 
 ## 📄 License
