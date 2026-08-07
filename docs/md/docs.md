@@ -26,7 +26,7 @@
 | **§2. Request Metadata & Errors** | `req` (`PyRequest`) object, custom `Response(..., status_code, headers)`, `HTTPException`. | Inspect headers, query/path params, and raise clean HTTP errors. |
 | **💡 FastAPI `Request` vs `req`** | Full property comparison table (`method`, `path`, `headers`, `cookies`, `form`, `files`, `body`, `json()`). | Eliminates confusion when migrating from FastAPI to RustAPI. |
 | **§3. Dependency Injection** | `Depends(func)`, generator setup/teardowns, and `app.dependency_overrides` for mocking in tests. | Smooth test mocking & request-scoped dependency management. |
-| **§4. Advanced I/O & File Uploads** | `StreamingResponse`, `UploadFile` (text `.decode("utf-8")` vs binary images via `io.BytesIO`), and `WebSocket` (`receive_text`/`send_text`). | Prevents common binary file upload errors (`UnicodeDecodeError`, `PIL` crashes). |
+| **§4. Advanced I/O & File Uploads** | `StreamingResponse`, `UploadFile` (text `.decode("utf-8")` vs binary images via `io.BytesIO`), and `WebSocket` (`receive_text`/`send_text`). | Prevents common binary file upload errors (see dedicated [`file_uploads.md`](file_uploads.md) guide). |
 | **§5. Rust-Native Database Engine** | SQLite & PostgreSQL connection strings (`app.connect_db()`), parameterized queries (`?1`, `$1`), `db.execute()`, `db.fetch_one()`, `db.fetch_all()`, and `db.query_json()`. | Direct SQL execution & zero-copy JSON socket streaming. |
 | **§6. Embedded Rust Power Modules** | `encode_jwt()` / `decode_jwt()`, `hash_password()` / `verify_password()` (Argon2), `render_template()` (MiniJinja), `HTMLResponse`, `JSONResponse`, `PlainTextResponse`, `RedirectResponse`. | High-speed C-extension primitives with zero external Python package dependencies. |
 | **🔒 Security & Authentication** | `OAuth2PasswordBearer`, `HTTPBearer`, `HTTPBasic`, `APIKeyHeader`, `APIKeyQuery`, `APIKeyCookie`, `encode_jwt`/`decode_jwt`. | Comprehensive security guide, OAuth2 password flow, JWT tokens, and Swagger UI 🔓 Authorize button integration (see [`security.md`](security.md)). |
@@ -562,9 +562,75 @@ def get_item(item_id: int, quantity: int = 1, discount: float = 0.0):
 
 ---
 
-### §13. Swagger UI & Custom OpenAPI Schema Overrides
+### §13. OpenAPI 3.0 Schema Generation & Swagger UI Integration
 
-RustAPI automatically generates `/openapi.json` and embeds Swagger UI at `/docs`. For complex endpoints (such as array file pickers or multi-field form schemas), you can register a Tier 3 native JSON route override for `/openapi.json`:
+RustAPI automatically inspects your endpoint route signatures, Pydantic parameter annotations, and decorator options to build an OpenAPI 3.0.0 specification served at `/openapi.json` and rendered interactively in Swagger UI at `/docs`.
+
+#### 1. Automatic Pydantic Model Schema Extraction (`$ref` & `$defs` Hoisting)
+When handler parameters or `response_model` use Pydantic models, RustAPI extracts their JSON schemas into `components["schemas"]` and links them using `$ref`:
+
+```python
+from pydantic import BaseModel
+from rustapi import FastAPI
+
+app = FastAPI(title="Catalog API")
+
+class ItemIn(BaseModel):
+    name: str
+    price: float
+
+class ItemOut(BaseModel):
+    id: int
+    name: str
+    price: float
+
+@app.post("/items", response_model=ItemOut)
+def create_item(item: ItemIn):
+    return ItemOut(id=101, name=item.name, price=item.price)
+```
+
+- **Request Body Schema**: Registered under `components["schemas"]["ItemIn"]` and referenced as `{"$ref": "#/components/schemas/ItemIn"}` under `requestBody["content"]["application/json"]["schema"]`.
+- **Response Model Schema**: Registered under `components["schemas"]["ItemOut"]` and referenced as `{"$ref": "#/components/schemas/UserOut"}` under `responses["200"]["content"]["application/json"]["schema"]`.
+- **Nested Models & `$defs`**: Nested models (e.g. `Company` referencing `Address`) automatically hoist nested definitions from `$defs` into `components["schemas"]` and convert references to `#/components/schemas/...`.
+
+#### 2. Validation Error Schemas (`HTTPValidationError` & `ValidationError`)
+All operations automatically include a `422 Unprocessable Entity` response referencing `#/components/schemas/HTTPValidationError`:
+
+```json
+{
+  "422": {
+    "description": "Validation Error",
+    "content": {
+      "application/json": {
+        "schema": {
+          "$ref": "#/components/schemas/HTTPValidationError"
+        }
+      }
+    }
+  }
+}
+```
+
+#### 3. Single and Multi-File Upload Schemas
+File parameters (`UploadFile = File(...)`) and multi-file array uploads (`List[UploadFile] = File(...)`) render interactive **Choose File** / **Choose Files** upload pickers in Swagger UI:
+
+```python
+from typing import List
+from rustapi import FastAPI, File, Form, UploadFile
+
+app = FastAPI()
+
+@app.post("/upload")
+def upload(file: UploadFile = File(...), description: str = Form("")):
+    return {"filename": file.filename, "description": description}
+
+@app.post("/upload-batch")
+def upload_batch(files: List[UploadFile] = File(...)):
+    return {"uploaded_count": len(files)}
+```
+
+#### 4. Custom OpenAPI Overrides via Native Fast-Paths
+If you need complete custom control over `/openapi.json`, register a Tier 3 native JSON route override:
 
 ```python
 import json
@@ -572,37 +638,12 @@ import rustapi
 
 app = rustapi.Engine()
 
-# Custom OpenAPI 3.0 specification for array file uploads
 custom_openapi = json.dumps({
     "openapi": "3.0.0",
-    "info": {"title": "My Production API", "version": "1.0.0"},
-    "paths": {
-        "/upload-documents": {
-            "post": {
-                "summary": "Upload Multiple Documents",
-                "requestBody": {
-                    "required": True,
-                    "content": {
-                        "multipart/form-data": {
-                            "schema": {
-                                "type": "object",
-                                "properties": {
-                                    "documents": {
-                                        "type": "array",
-                                        "items": {"type": "string", "format": "binary"}
-                                    }
-                                }
-                            }
-                        }
-                    }
-                },
-                "responses": {"200": {"description": "Upload Success"}}
-            }
-        }
-    }
+    "info": {"title": "Production API", "version": "1.0.0"},
+    "paths": { ... }
 })
 
-# Register Tier 3 Native Route Override
 app.add_native_route("/openapi.json", custom_openapi, content_type="application/json")
 ```
 

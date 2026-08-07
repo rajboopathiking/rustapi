@@ -2,8 +2,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import inspect
 import json as _json
 from .status import status
+from pydantic import BaseModel
 from ._rustapi import (
-    Engine,
+    Engine as _RustEngine,
     Route,
     PyRequest,
     UploadFile,
@@ -34,6 +35,71 @@ from .param_functions import (
 
 from .responses import FileResponse
 from . import responses, middleware, security, openapi
+
+
+class Engine(_RustEngine):
+    """RustAPI Engine application class wrapping the Rust Tokio core engine."""
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__()
+        self._route_metadata: List[Tuple[str, str, Any, List[str], Dict[str, Any]]] = []
+        self._openapi_schema: Optional[Dict[str, Any]] = None
+
+    def _add_route_decorator(self, method: str, path: str, response_model: Optional[Any] = None, tags: Optional[List[str]] = None, **kwargs: Any):
+        merged_kwargs = dict(kwargs)
+        merged_kwargs['response_model'] = response_model
+        if tags:
+            merged_kwargs['tags'] = tags
+
+        rust_dec = getattr(super(), method.lower())(path)
+
+        def decorator(func: Any):
+            handler_to_register = func
+            if response_model:
+                import functools
+                from typing import get_origin, get_args
+
+                actual_func = func
+
+                @functools.wraps(actual_func)
+                def response_model_wrapper(*args, **kw):
+                    res = actual_func(*args, **kw)
+                    if res is not None:
+                        if isinstance(response_model, type) and issubclass(response_model, BaseModel):
+                            if isinstance(res, list):
+                                return [response_model.model_validate(item).model_dump() for item in res]
+                            elif isinstance(res, dict):
+                                return response_model.model_validate(res).model_dump()
+                        elif hasattr(response_model, "__args__") and get_origin(response_model) in (list, tuple, set):
+                            elem_cls = get_args(response_model)[0]
+                            if isinstance(elem_cls, type) and issubclass(elem_cls, BaseModel) and isinstance(res, list):
+                                return [elem_cls.model_validate(item).model_dump() for item in res]
+                    return res
+
+                handler_to_register = response_model_wrapper
+
+            res = rust_dec(handler_to_register)
+            self._route_metadata.append((method, path, func, tags or [], merged_kwargs))
+            self._openapi_schema = None
+            return res
+
+        return decorator
+
+    def get(self, path: str, response_model: Optional[Any] = None, tags: Optional[List[str]] = None, **kwargs: Any):
+        return self._add_route_decorator("GET", path, response_model=response_model, tags=tags, **kwargs)
+
+    def post(self, path: str, response_model: Optional[Any] = None, tags: Optional[List[str]] = None, **kwargs: Any):
+        return self._add_route_decorator("POST", path, response_model=response_model, tags=tags, **kwargs)
+
+    def put(self, path: str, response_model: Optional[Any] = None, tags: Optional[List[str]] = None, **kwargs: Any):
+        return self._add_route_decorator("PUT", path, response_model=response_model, tags=tags, **kwargs)
+
+    def delete(self, path: str, response_model: Optional[Any] = None, tags: Optional[List[str]] = None, **kwargs: Any):
+        return self._add_route_decorator("DELETE", path, response_model=response_model, tags=tags, **kwargs)
+
+    def patch(self, path: str, response_model: Optional[Any] = None, tags: Optional[List[str]] = None, **kwargs: Any):
+        return self._add_route_decorator("PATCH", path, response_model=response_model, tags=tags, **kwargs)
+
 
 class FastAPI(Engine):
     """FastAPI-compatible application class wrapping the Rust Tokio core engine."""
@@ -76,9 +142,6 @@ class FastAPI(Engine):
         self.license_info = license_info
         self.exception_handlers: Dict[Any, Any] = {}
         self.middlewares: list = []
-        # Route metadata for OpenAPI generation: list of (method, path, handler, tags, kwargs)
-        self._route_metadata: List[Tuple[str, str, Any, List[str], Dict[str, Any]]] = []
-        self._openapi_schema: Optional[Dict[str, Any]] = None
         self.dependency_overrides: Dict[Any, Any] = {}
 
     def add_middleware(self, middleware_cls: type, **kwargs: Any):
@@ -246,7 +309,73 @@ class FastAPI(Engine):
             schema["tags"] = self.openapi_tags
 
         security_schemes: Dict[str, Dict[str, Any]] = {}
+        components_schemas: Dict[str, Any] = {}
         paths: Dict[str, Dict[str, Any]] = {}
+
+        VALIDATION_ERROR_DEFINITION = {
+            "title": "ValidationError",
+            "type": "object",
+            "properties": {
+                "loc": {
+                    "title": "Location",
+                    "type": "array",
+                    "items": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+                },
+                "msg": {"title": "Message", "type": "string"},
+                "type": {"title": "Error Type", "type": "string"},
+                "input": {"title": "Input"},
+                "ctx": {"title": "Context", "type": "object"},
+            },
+            "required": ["loc", "msg", "type"],
+        }
+
+        HTTP_VALIDATION_ERROR_DEFINITION = {
+            "title": "HTTPValidationError",
+            "type": "object",
+            "properties": {
+                "detail": {
+                    "title": "Detail",
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/ValidationError"},
+                }
+            },
+            "type": "object",
+            "title": "HTTPValidationError",
+        }
+
+        def _fix_refs(obj: Any) -> Any:
+            if isinstance(obj, dict):
+                res = {}
+                for k, v in obj.items():
+                    if k == "$ref" and isinstance(v, str) and v.startswith("#/$defs/"):
+                        res[k] = "#/components/schemas/" + v[len("#/$defs/"):]
+                    else:
+                        res[k] = _fix_refs(v)
+                return res
+            elif isinstance(obj, list):
+                return [_fix_refs(x) for x in obj]
+            return obj
+
+        def _extract_model_schema(model_cls: Any) -> Optional[str]:
+            if not model_cls or not hasattr(model_cls, "__name__"):
+                return None
+            name = getattr(model_cls, "__name__", "Model")
+            if name not in components_schemas:
+                if hasattr(model_cls, "model_json_schema"):
+                    schema_data = model_cls.model_json_schema()
+                elif hasattr(model_cls, "schema"):
+                    schema_data = model_cls.schema()
+                else:
+                    return None
+
+                defs = schema_data.pop("$defs", None)
+                if defs and isinstance(defs, dict):
+                    for def_name, def_schema in defs.items():
+                        if def_name not in components_schemas:
+                            components_schemas[def_name] = _fix_refs(def_schema)
+
+                components_schemas[name] = _fix_refs(schema_data)
+            return name
 
         metadata_routes = list(self._route_metadata)
         registered_keys = {(m.lower(), p) for m, p, _, _, _ in metadata_routes}
@@ -274,14 +403,38 @@ class FastAPI(Engine):
 
             # Build operation object
             handler_name = getattr(handler, '__name__', 'handler')
+            import re
+            clean_path = re.sub(r'[\{\}/]', '_', path).strip('_')
+
+            response_200: Dict[str, Any] = {"description": "Successful Response"}
+            resp_model = kwargs.get('response_model')
+            if resp_model:
+                model_ref_name = _extract_model_schema(resp_model)
+                if model_ref_name:
+                    response_200["content"] = {
+                        "application/json": {
+                            "schema": {"$ref": f"#/components/schemas/{model_ref_name}"}
+                        }
+                    }
+
             operation: Dict[str, Any] = {
                 "summary": kwargs.get('summary') or handler_name.replace('_', ' ').title(),
-                "operationId": f"{handler_name}_{path.replace('/', '_').strip('_')}_{method_lower}",
+                "operationId": f"{handler_name}_{clean_path}_{method_lower}",
                 "responses": kwargs.get('responses') or {
-                    "200": {"description": "Successful Response"},
-                    "422": {"description": "Validation Error"},
+                    "200": response_200,
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/HTTPValidationError"}
+                            }
+                        },
+                    },
                 },
             }
+            if "ValidationError" not in components_schemas:
+                components_schemas["ValidationError"] = VALIDATION_ERROR_DEFINITION
+                components_schemas["HTTPValidationError"] = HTTP_VALIDATION_ERROR_DEFINITION
 
             if kwargs.get('description'):
                 operation["description"] = kwargs['description']
@@ -294,21 +447,40 @@ class FastAPI(Engine):
             if kwargs.get('deprecated'):
                 operation["deprecated"] = True
 
-            # Parse path parameters
-            import re
+            # Inspect handler signature
+            try:
+                sig = inspect.signature(handler)
+            except (ValueError, TypeError):
+                sig = None
+
+            # Parse path parameters with type resolution from signature
             path_params = re.findall(r'\{(\w+)\}', path)
             parameters: List[Dict[str, Any]] = []
             for pp in path_params:
+                pp_schema: Dict[str, Any] = {"type": "string"}
+                if sig and pp in sig.parameters:
+                    pp_ann = sig.parameters[pp].annotation
+                    if pp_ann is int:
+                        pp_schema = {"type": "integer"}
+                    elif pp_ann is float:
+                        pp_schema = {"type": "number"}
+                    elif pp_ann is bool:
+                        pp_schema = {"type": "boolean"}
+
                 parameters.append({
                     "name": pp,
                     "in": "path",
                     "required": True,
-                    "schema": {"type": "string"},
+                    "schema": pp_schema,
                 })
 
-            # Inspect handler signature for query parameters
-            try:
-                sig = inspect.signature(handler)
+            # Inspect handler signature for query parameters and multipart file/form fields
+            is_multipart = False
+            multipart_props: Dict[str, Any] = {}
+            required_multipart: List[str] = []
+            body_pydantic_ref: Optional[str] = None
+
+            if sig:
                 skip_params = {'self', 'cls', 'request', 'req', 'session', 'db',
                                'current_user', 'token_auth', 'return'}
                 for pname, param in sig.parameters.items():
@@ -317,14 +489,82 @@ class FastAPI(Engine):
                     if pname in path_params:
                         continue
                     from .depends import Depends as _Dep
-                    if isinstance(param.default, _Dep):
-                        continue
                     from .security.base import SecurityBase as _SB
-                    if isinstance(param.default, _SB):
+
+                    is_dep_object = (
+                        isinstance(param.default, (_Dep, _SB))
+                        or getattr(param.default, "__class__", None).__name__ in ("Depends", "Security", "HTTPBearer", "OAuth2PasswordBearer", "APIKeyHeader", "APIKeyQuery", "APIKeyCookie", "HTTPBasic", "HTTPDigest")
+                        or hasattr(param.default, "dependency")
+                    )
+                    if is_dep_object:
+                        continue
+
+                    from typing import get_origin, get_args
+                    from .param_functions import FileParam, FormParam
+
+                    ann = param.annotation
+                    ann_str = str(ann)
+                    ann_name = getattr(ann, '__name__', ann_str)
+                    origin = get_origin(ann)
+                    args = get_args(ann)
+
+                    # Check if parameter is a Pydantic model for JSON request body
+                    if isinstance(ann, type) and (hasattr(ann, "model_json_schema") or hasattr(ann, "schema")):
+                        body_pydantic_ref = _extract_model_schema(ann)
+                        continue
+
+                    is_sequence = (
+                        origin in (list, tuple, set)
+                        or 'list' in ann_str.lower()
+                        or 'sequence' in ann_str.lower()
+                    )
+
+                    is_file_param = (
+                        isinstance(param.default, FileParam)
+                        or getattr(param.default, '__class__', None).__name__ == 'FileParam'
+                        or ann_name == 'UploadFile'
+                        or 'UploadFile' in ann_str
+                        or any('UploadFile' in str(a) for a in args)
+                    )
+
+                    is_form_param = (
+                        isinstance(param.default, FormParam)
+                        or getattr(param.default, '__class__', None).__name__ == 'FormParam'
+                    )
+
+                    if is_file_param or is_form_param:
+                        is_multipart = True
+                        if is_file_param:
+                            if is_sequence:
+                                multipart_props[pname] = {
+                                    "type": "array",
+                                    "items": {"type": "string", "format": "binary"},
+                                }
+                            else:
+                                multipart_props[pname] = {"type": "string", "format": "binary"}
+                        else:
+                            f_schema: Dict[str, Any] = {"type": "string"}
+                            if ann is int:
+                                f_schema = {"type": "integer"}
+                            elif ann is float:
+                                f_schema = {"type": "number"}
+                            elif ann is bool:
+                                f_schema = {"type": "boolean"}
+
+                            if is_sequence:
+                                multipart_props[pname] = {
+                                    "type": "array",
+                                    "items": f_schema,
+                                }
+                            else:
+                                multipart_props[pname] = f_schema
+
+                        default_val = getattr(param.default, 'default', param.default)
+                        if param.default is inspect.Parameter.empty or default_val is ...:
+                            required_multipart.append(pname)
                         continue
 
                     p_schema: Dict[str, Any] = {"type": "string"}
-                    ann = param.annotation
                     if ann is not inspect.Parameter.empty:
                         if ann is int:
                             p_schema = {"type": "integer"}
@@ -333,6 +573,11 @@ class FastAPI(Engine):
                         elif ann is bool:
                             p_schema = {"type": "boolean"}
 
+                    def_val = getattr(param.default, 'default', param.default)
+                    if def_val is not inspect.Parameter.empty and def_val is not ...:
+                        if isinstance(def_val, (int, float, str, bool, list, dict, type(None))):
+                            p_schema["default"] = def_val
+
                     p_entry: Dict[str, Any] = {
                         "name": pname,
                         "in": "query",
@@ -340,34 +585,42 @@ class FastAPI(Engine):
                         "schema": p_schema,
                     }
                     parameters.append(p_entry)
-            except (ValueError, TypeError):
-                pass
 
             if parameters:
                 operation["parameters"] = parameters
 
             # Request body for mutation methods
             if method_lower in ('post', 'put', 'patch'):
-                if 'upload' in path.lower() or 'file' in path.lower():
+                if is_multipart or 'upload' in path.lower() or 'file' in path.lower():
+                    if not multipart_props:
+                        multipart_props = {"file": {"type": "string", "format": "binary"}}
+
+                    req_schema: Dict[str, Any] = {
+                        "type": "object",
+                        "properties": multipart_props,
+                    }
+                    if required_multipart:
+                        req_schema["required"] = required_multipart
+
                     operation["requestBody"] = {
                         "required": True,
                         "content": {
                             "multipart/form-data": {
-                                "schema": {
-                                    "type": "object",
-                                    "properties": {
-                                        "file": {"type": "string", "format": "binary"}
-                                    }
-                                }
+                                "schema": req_schema
                             }
                         },
                     }
                 else:
+                    body_schema_obj = (
+                        {"$ref": f"#/components/schemas/{body_pydantic_ref}"}
+                        if body_pydantic_ref
+                        else {"type": "object"}
+                    )
                     operation["requestBody"] = {
                         "required": True,
                         "content": {
                             "application/json": {
-                                "schema": {"type": "object"}
+                                "schema": body_schema_obj
                             }
                         },
                     }
@@ -400,9 +653,14 @@ class FastAPI(Engine):
 
         schema["paths"] = paths
 
-        # Add security schemes to components
+        # Add components (schemas and securitySchemes)
+        components: Dict[str, Any] = {}
+        if components_schemas:
+            components["schemas"] = components_schemas
         if security_schemes:
-            schema["components"] = {"securitySchemes": security_schemes}
+            components["securitySchemes"] = security_schemes
+        if components:
+            schema["components"] = components
 
         self._openapi_schema = schema
 

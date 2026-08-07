@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RustAPI — OpenAPI 3.0 & Pydantic Schema Generation Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0d10;
+    --surface-1: #13171f;
+    --surface-2: #1c222d;
+    --surface-3: #252d3c;
+    --border: #2e384a;
+    --border-light: #3a475d;
+    --text: #f0f4f8;
+    --text-muted: #94a3b8;
+    --text-dim: #64748b;
+    --rust: #f95738;
+    --rust-hover: #e04324;
+    --rust-dim: rgba(249, 87, 56, 0.15);
+    --python: #38bdf8;
+    --success: #10b981;
+    --radius: 8px;
+    --radius-lg: 12px;
+    --font-display: 'Space Grotesk', sans-serif;
+    --font-body: 'Inter', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--font-body); font-size: 15px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--rust); text-decoration: none; transition: color 0.15s; }
+  a:hover { color: var(--rust-hover); text-decoration: underline; }
+  code, pre { font-family: var(--font-mono); }
+  ::selection { background: var(--rust); color: #fff; }
+
+  /* Navigation Bar */
+  .navbar {
+    position: sticky; top: 0; z-index: 100; background: rgba(11, 13, 16, 0.95);
+    backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    padding: 14px 28px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .nav-brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-weight: 700; font-size: 1.25rem; }
+  .nav-brand img { height: 38px; width: auto; border-radius: 6px; }
+  .nav-links { display: flex; gap: 16px; align-items: center; }
+  .nav-links a {
+    color: var(--text-muted); font-size: 0.88rem; font-weight: 500; padding: 6px 12px;
+    border-radius: var(--radius); transition: all 0.15s ease;
+  }
+  .nav-links a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
+  .nav-links a.active { color: var(--rust); background: var(--rust-dim); font-weight: 600; }
+
+  /* Shell Layout */
+  .shell { display: flex; max-width: 1400px; margin: 0 auto; min-height: calc(100vh - 67px); }
+  .sidebar {
+    width: 270px; flex-shrink: 0; position: sticky; top: 67px; align-self: flex-start;
+    height: calc(100vh - 67px); overflow-y: auto; padding: 28px 20px; border-right: 1px solid var(--border);
+    background: rgba(11, 13, 16, 0.5);
+  }
+  .sidebar nav { display: flex; flex-direction: column; gap: 4px; }
+  .sidebar nav a {
+    color: var(--text-muted); font-size: 0.88rem; padding: 8px 12px; border-radius: var(--radius);
+    transition: all 0.15s ease; font-weight: 500;
+  }
+  .sidebar nav a:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
+  .sidebar nav a.active { background: var(--rust-dim); color: var(--rust); font-weight: 600; }
+  .sidebar-category {
+    font-family: var(--font-mono); font-size: 0.68rem; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--text-dim); margin: 16px 0 6px 12px;
+  }
+
+  .content { flex: 1; min-width: 0; padding: 0 56px 120px; }
+  .content section { padding-top: 56px; border-bottom: 1px solid var(--border); padding-bottom: 48px; }
+  .content section:last-of-type { border-bottom: none; }
+
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--rust); background: var(--rust-dim); padding: 4px 14px; border-radius: 20px;
+    display: inline-block; margin-bottom: 20px; border: 1px solid rgba(249, 87, 56, 0.3);
+  }
+
+  h1, h2, h3 { font-family: var(--font-display); color: #fff; margin-top: 0; }
+  h1 { font-size: 2.5rem; }
+  h2 { font-size: 1.75rem; }
+
+  pre {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-lg);
+    padding: 20px 24px; overflow-x: auto; font-size: 0.88rem; line-height: 1.6; color: #e2e8f0;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);
+  }
+  code:not(pre code) { background: var(--surface-2); padding: 2px 7px; border-radius: 4px; font-size: 0.85em; color: var(--rust); border: 1px solid var(--border); }
+  .kw { color: #f472b6; font-weight: 600; }
+  .dec { color: var(--rust); font-weight: 600; }
+  .str { color: #a3e635; }
+  .com { color: var(--text-dim); font-style: italic; }
+  .cls { color: #38bdf8; font-weight: 600; }
+
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 24px; margin: 16px 0; }
+  .badge { font-size: 0.72rem; padding: 3px 8px; border-radius: 4px; font-family: var(--font-mono); font-weight: 600; }
+  .badge-post { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+  .badge-get { background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
+
+  footer { margin-top: 80px; padding: 40px 0; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.85rem; text-align: center; }
+
+  @media (max-width: 900px) {
+    .shell { display: block; }
+    .sidebar { position: relative; width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); top: 0; }
+    .content { padding: 0 20px 80px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="navbar">
+  <div class="nav-brand">
+    <span>RustAPI ⚡</span>
+  </div>
+  <nav class="nav-links">
+    <a href="index.html">Home</a>
+    <a href="getting-started.html">Getting Started</a>
+    <a href="openapi-pydantic.html" class="active">OpenAPI &amp; Schemas</a>
+    <a href="benchmarks.html">Benchmarks Report</a>
+    <a href="database.html">Database Engine</a>
+    <a href="security-power-modules.html">Security Modules</a>
+    <a href="mcp-server.html">MCP AI Protocol</a>
+    <a href="api-reference.html">API Reference</a>
+  </nav>
+</header>
+
+<div class="shell">
+  <aside class="sidebar">
+    <nav>
+      <div class="sidebar-category">OpenAPI Guide</div>
+      <a href="#overview" class="active">Overview</a>
+      <a href="#pydantic">Pydantic $ref Models</a>
+      <a href="#validation">Validation Error (422)</a>
+      <a href="#file-uploads">UploadFile &amp; Form Schemas</a>
+      <a href="#security">Security Schemes</a>
+      <a href="#standalone">Standalone Utility</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+
+    <section id="overview">
+      <span class="eyebrow">Interactive OpenAPI 3.0</span>
+      <h1>🛠 OpenAPI 3.0 &amp; Pydantic Schema Generation</h1>
+      <p>RustAPI provides automatic, 100% FastAPI-compatible OpenAPI 3.0.0 specification generation served at <code>/openapi.json</code> and rendered interactively in Swagger UI at <code>/docs</code> and Redoc at <code>/redoc</code>.</p>
+
+      <div class="card">
+        <h3>✨ Architectural Advantages</h3>
+        <ul>
+          <li><strong>Zero-Copy Ref Resolution</strong>: Pydantic models automatically register schemas in <code>components["schemas"]</code> and link via <code>$ref</code>.</li>
+          <li><strong>Nested Hoisting</strong>: Pydantic v2 <code>$defs</code> nested schemas are automatically hoisted to <code>components["schemas"]</code>.</li>
+          <li><strong>Standard 422 Payload</strong>: Standardized <code>HTTPValidationError</code> and <code>ValidationError</code> schemas on all endpoints.</li>
+          <li><strong>Interactive Swagger Pickers</strong>: Single and multi-file array upload pickers for Swagger UI.</li>
+          <li><strong>Dependency Isolation</strong>: <code>Depends(...)</code> objects are excluded from query parameters without crashing JSON serializers.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="pydantic">
+      <span class="eyebrow">Schema Resolution</span>
+      <h2>📦 Pydantic Request &amp; Response Models</h2>
+      <p>Decorate route handlers with <code>response_model</code> or use Pydantic type annotations for request body parameters:</p>
+
+      <pre><code><span class="kw">from</span> pydantic <span class="kw">import</span> BaseModel
+<span class="kw">from</span> rustapi <span class="kw">import</span> FastAPI
+
+app = FastAPI(title=<span class="str">"Product Catalog API"</span>)
+
+<span class="kw">class</span> <span class="cls">ProductIn</span>(BaseModel):
+    name: str
+    price: float
+
+<span class="kw">class</span> <span class="cls">ProductOut</span>(BaseModel):
+    id: int
+    name: str
+    price: float
+
+<span class="dec">@app.post</span>(<span class="str">"/products"</span>, response_model=ProductOut, status_code=201)
+<span class="kw">def</span> create_product(product: ProductIn):
+    <span class="kw">return</span> ProductOut(id=1, name=product.name, price=product.price)</code></pre>
+    </section>
+
+    <section id="validation">
+      <span class="eyebrow">Structured Errors</span>
+      <h2>⚠️ Validation Error Schemas (422)</h2>
+      <p>When query, path, or request body payloads fail type validation, RustAPI yields structured <code>422 Unprocessable Entity</code> JSON matching FastAPI:</p>
+
+      <pre><code>{
+  <span class="str">"detail"</span>: [
+    {
+      <span class="str">"loc"</span>: [<span class="str">"query"</span>, <span class="str">"item_id"</span>],
+      <span class="str">"msg"</span>: <span class="str">"invalid integer value"</span>,
+      <span class="str">"type"</span>: <span class="str">"type_error.integer"</span>
+    }
+  ]
+}</code></pre>
+    </section>
+
+    <section id="file-uploads">
+      <span class="eyebrow">Multipart Form-Data</span>
+      <h2>📁 UploadFile &amp; Form Schemas</h2>
+
+      <pre><code><span class="kw">from</span> typing <span class="kw">import</span> List
+<span class="kw">from</span> rustapi <span class="kw">import</span> FastAPI, File, Form, UploadFile
+
+app = FastAPI()
+
+<span class="dec">@app.post</span>(<span class="str">"/upload"</span>)
+<span class="kw">def</span> upload_single(file: UploadFile = File(...), note: str = Form(<span class="str">""</span>)):
+    <span class="kw">return</span> {<span class="str">"filename"</span>: file.filename, <span class="str">"note"</span>: note}
+
+<span class="dec">@app.post</span>(<span class="str">"/upload-batch"</span>)
+<span class="kw">def</span> upload_multi(files: List[UploadFile] = File(...)):
+    <span class="kw">return</span> {<span class="str">"count"</span>: len(files)}</code></pre>
+    </section>
+
+    <section id="standalone">
+      <span class="eyebrow">Standalone Generator</span>
+      <h2>🔧 Standalone OpenAPI Utility</h2>
+
+      <pre><code><span class="kw">from</span> rustapi.openapi.utils <span class="kw">import</span> get_openapi
+
+spec = get_openapi(
+    title=<span class="str">"Custom Microservice"</span>,
+    version=<span class="str">"1.0.0"</span>,
+    description=<span class="str">"Standalone OpenAPI 3.0 spec generator"</span>,
+)</code></pre>
+    </section>
+
+    <footer>
+      <p>RustAPI v0.3.3 — Built with Tokio, Hyper, PyO3, and sqlx. MIT Licensed.</p>
+    </footer>
+
+  </main>
+</div>
+
+</body>
+</html>
