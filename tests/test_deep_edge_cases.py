@@ -66,6 +66,11 @@ def trigger_bg_task(task_id: str, bg: BackgroundTasks):
     return {"message": "task scheduled"}
 
 
+@app.get("/bg-tasks-executed")
+def get_bg_tasks_executed():
+    return bg_executed
+
+
 @app.get("/custom-response")
 def custom_response():
     return JSONResponse(
@@ -86,14 +91,18 @@ def sse_stream():
 
 @pytest.fixture(scope="module", autouse=True)
 def run_edge_case_server():
-    server_thread = threading.Thread(
-        target=lambda: app.run(host=HOST, port=PORT),
-        daemon=True,
+    import subprocess, signal, sys, os
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from tests.test_deep_edge_cases import app, HOST, PORT; app.run(host=HOST, port=PORT, reload=False)",
+        ],
+        start_new_session=(sys.platform != "win32"),
     )
-    server_thread.start()
 
     connected = False
-    for _ in range(25):
+    for _ in range(50):
         try:
             r = requests.get(f"{BASE}/custom-response", timeout=1)
             if r.status_code == 202:
@@ -102,6 +111,15 @@ def run_edge_case_server():
         except Exception:
             time.sleep(0.1)
     assert connected, "Deep edge case server failed to launch"
+    yield
+    try:
+        if sys.platform == "win32":
+            proc.terminate()
+        else:
+            os.killpg(proc.pid, signal.SIGINT)
+        proc.wait(timeout=3)
+    except Exception:
+        proc.kill()
 
 
 def test_pydantic_validation_success():
@@ -135,7 +153,9 @@ def test_background_task_execution():
     assert r.json()["message"] == "task_scheduled" or r.json()["message"] == "task scheduled"
 
     time.sleep(0.2)
-    assert "bg_test_1001" in bg_executed
+    res = requests.get(f"{BASE}/bg-tasks-executed")
+    assert res.status_code == 200
+    assert "bg_test_1001" in res.json()
 
 
 def test_argon2_password_hashing_security():

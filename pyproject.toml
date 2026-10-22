@@ -46,7 +46,6 @@ test = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["python"]
 # Store built-in test output artefacts under test-reports/
 addopts = [
     "-v",

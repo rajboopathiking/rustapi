@@ -1,6 +1,7 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 from rustapi import FastAPI, Depends, HTTPException
+from rustapi.responses import JSONResponse
 
 
 @pytest.mark.asyncio
@@ -227,4 +228,234 @@ async def test_delayed_response_sending_request_scope():
         assert resp.json() == {"db": "active_session"}
 
     assert events == ["db_opened", "handler_executed", "db_closed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [400, 404, 500])
+async def test_returned_error_response_preserves_request_scope_until_body_completion(status_code):
+    """Verify that a handler returning an error response (400, 404, 500) preserves
+    request-scoped dependencies through response completion, while function-scoped
+    dependencies clean up before response transmission begins."""
+    app = FastAPI()
+    events = []
+
+    def func_dep():
+        events.append("enter_func")
+        try:
+            yield "func_val"
+        finally:
+            events.append("exit_func")
+
+    async def req_dep():
+        events.append("enter_req")
+        try:
+            yield "req_val"
+        finally:
+            events.append("exit_req")
+
+    @app.get("/error-return")
+    async def error_route(f: str = Depends(func_dep, scope="function"), r: str = Depends(req_dep, scope="request")):
+        events.append("handler_running")
+        return JSONResponse(status_code=status_code, content={"error": f"returned_{status_code}"})
+
+    async def custom_send(message):
+        events.append(f"send_{message['type']}")
+        if message["type"] == "http.response.start":
+            # Function-scoped MUST have exited, but request-scoped MUST NOT have exited
+            assert "exit_func" in events
+            assert "exit_req" not in events
+        elif message["type"] == "http.response.body":
+            # While transmitting body, request-scoped MUST still be active
+            assert "exit_req" not in events
+
+    async def custom_receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/error-return",
+        "headers": [],
+        "query_string": b"",
+        "server": ("127.0.0.1", 80),
+    }
+
+    await app(scope, custom_receive, custom_send)
+
+    # After app completes, request-scoped dependency MUST be cleaned up
+    assert "exit_req" in events
+    assert events == [
+        "enter_func",
+        "enter_req",
+        "handler_running",
+        "exit_func",
+        "send_http.response.start",
+        "send_http.response.body",
+        "exit_req",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sync_and_async_yield_dependencies_with_returned_error():
+    """Verify both synchronous and asynchronous yield dependencies preserve request scope
+    during returned error responses."""
+    app = FastAPI()
+    events = []
+
+    def sync_req_dep():
+        events.append("enter_sync_req")
+        try:
+            yield "sync_req_val"
+        finally:
+            events.append("exit_sync_req")
+
+    async def async_req_dep():
+        events.append("enter_async_req")
+        try:
+            yield "async_req_val"
+        finally:
+            events.append("exit_async_req")
+
+    @app.get("/dual-error")
+    async def dual_error_route(
+        s: str = Depends(sync_req_dep, scope="request"),
+        a: str = Depends(async_req_dep, scope="request"),
+    ):
+        events.append("handler_exec")
+        return JSONResponse(status_code=400, content={"status": "fail"})
+
+    async def custom_send(message):
+        events.append(f"send_{message['type']}")
+        if message["type"] == "http.response.body":
+            assert "exit_sync_req" not in events
+            assert "exit_async_req" not in events
+
+    async def custom_receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/dual-error",
+        "headers": [],
+        "query_string": b"",
+        "server": ("127.0.0.1", 80),
+    }
+
+    await app(scope, custom_receive, custom_send)
+
+    # Both must exit after response completion in reverse order
+    assert "exit_sync_req" in events
+    assert "exit_async_req" in events
+    assert events == [
+        "enter_sync_req",
+        "enter_async_req",
+        "handler_exec",
+        "send_http.response.start",
+        "send_http.response.body",
+        "exit_async_req",
+        "exit_sync_req",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_raised_exception_vs_returned_response_timing():
+    """Verify that raised exceptions unwind and tear down dependencies before sending
+    the exception response (matching FastAPI), whereas returned responses keep request-scoped
+    dependencies alive until after body completion."""
+    app = FastAPI()
+    raise_events = []
+    return_events = []
+
+    def make_dep(events_list):
+        async def dep():
+            events_list.append("dep_enter")
+            try:
+                yield "val"
+            finally:
+                events_list.append("dep_exit")
+        return dep
+
+    @app.get("/raise-400")
+    async def raise_route(d: str = Depends(make_dep(raise_events), scope="request")):
+        raise_events.append("handler")
+        raise HTTPException(status_code=400, detail="Raised 400 error")
+
+    @app.get("/return-400")
+    async def return_route(d: str = Depends(make_dep(return_events), scope="request")):
+        return_events.append("handler")
+        return JSONResponse(status_code=400, content={"detail": "Returned 400 error"})
+
+    def make_custom_send(events_list):
+        async def send_cb(msg):
+            events_list.append(f"send_{msg['type']}")
+        return send_cb
+
+    async def custom_receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    # Test raised exception: dep_exit happens before send
+    scope_raise = {
+        "type": "http", "method": "GET", "path": "/raise-400",
+        "headers": [], "query_string": b"", "server": ("127.0.0.1", 80),
+    }
+    await app(scope_raise, custom_receive, make_custom_send(raise_events))
+    assert raise_events == [
+        "dep_enter",
+        "handler",
+        "dep_exit",
+        "send_http.response.start",
+        "send_http.response.body",
+    ]
+
+    # Test returned error response: dep_exit happens after send
+    scope_return = {
+        "type": "http", "method": "GET", "path": "/return-400",
+        "headers": [], "query_string": b"", "server": ("127.0.0.1", 80),
+    }
+    await app(scope_return, custom_receive, make_custom_send(return_events))
+    assert return_events == [
+        "dep_enter",
+        "handler",
+        "send_http.response.start",
+        "send_http.response.body",
+        "dep_exit",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_failure_and_cancellation_cleans_up_exactly_once():
+    """Verify that if ASGI send fails during body transmission, cleanup occurs
+    in finally: and runs exactly once."""
+    app = FastAPI()
+    cleanup_count = 0
+
+    async def res_dep():
+        nonlocal cleanup_count
+        try:
+            yield "resource"
+        finally:
+            cleanup_count += 1
+
+    @app.get("/send-fail")
+    async def send_fail_route(r: str = Depends(res_dep, scope="request")):
+        return {"result": r}
+
+    async def failing_send(message):
+        if message["type"] == "http.response.body":
+            raise ConnectionResetError("Client disconnected during body write")
+
+    async def custom_receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {
+        "type": "http", "method": "GET", "path": "/send-fail",
+        "headers": [], "query_string": b"", "server": ("127.0.0.1", 80),
+    }
+
+    with pytest.raises(ConnectionResetError):
+        await app(scope, custom_receive, failing_send)
+
+    # Cleanup must occur exactly once
+    assert cleanup_count == 1
 

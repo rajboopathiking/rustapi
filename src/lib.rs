@@ -7,7 +7,13 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex as StdMutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use futures_util::Stream;
+
 static DB_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+static PENDING_TEARDOWNS: AtomicUsize = AtomicUsize::new(0);
 
 fn get_db_rt() -> &'static tokio::runtime::Runtime {
     DB_RT.get_or_init(|| {
@@ -954,6 +960,49 @@ impl CoroCallback {
 // Streaming response builder — single canonical implementation
 // ---------------------------------------------------------------------------
 
+struct StreamingBodyStream {
+    rx: tokio::sync::mpsc::Receiver<Result<hyper::body::Bytes, Infallible>>,
+    completed: Arc<AtomicBool>,
+    teardown_list_py: Option<PyObject>,
+    schedule_coro: Arc<PyObject>,
+}
+
+impl StreamingBodyStream {
+    fn trigger_teardown(&mut self) {
+        if !self.completed.swap(true, Ordering::SeqCst) {
+            if let Some(td_list) = self.teardown_list_py.take() {
+                let sc = self.schedule_coro.clone();
+                PENDING_TEARDOWNS.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    run_dependency_teardown(&td_list, &sc, Some("request")).await;
+                    PENDING_TEARDOWNS.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        }
+    }
+}
+
+impl Stream for StreamingBodyStream {
+    type Item = Result<hyper::body::Bytes, Infallible>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.rx.poll_recv(cx) {
+            Poll::Ready(Some(item)) => Poll::Ready(Some(item)),
+            Poll::Ready(None) => {
+                self.trigger_teardown();
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for StreamingBodyStream {
+    fn drop(&mut self) {
+        self.trigger_teardown();
+    }
+}
+
 /// Converts a `PyStreamingResponse` into a chunked `HyperResponse<Body>`.
 /// This is the single source of truth; the old duplicate blocks are gone.
 fn build_streaming_response(
@@ -961,14 +1010,33 @@ fn build_streaming_response(
     status: u16,
     headers: HashMap<String, String>,
     teardown_list_py: Option<PyObject>,
+    schedule_coro: Arc<PyObject>,
 ) -> HyperResponse<Body> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<hyper::body::Bytes, Infallible>>(32);
+    let completed = Arc::new(AtomicBool::new(false));
+
+    let completed_task = completed.clone();
+    let td_list_task = teardown_list_py.as_ref().map(|td| Python::with_gil(|py| td.clone_ref(py)));
+    let sc_task = schedule_coro.clone();
+
+    let trigger_task_teardown = move || {
+        if !completed_task.swap(true, Ordering::SeqCst) {
+            if let Some(td_list) = td_list_task {
+                let sc = sc_task.clone();
+                PENDING_TEARDOWNS.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    run_dependency_teardown(&td_list, &sc, Some("request")).await;
+                    PENDING_TEARDOWNS.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        }
+    };
 
     tokio::task::spawn_blocking(move || {
         Python::with_gil(|py| {
-            let Ok(builtins) = py.import_bound("builtins") else { return; };
-            let Ok(iterator) = builtins.call_method1("iter", (&content,)) else { return; };
-            let Ok(next_fn) = builtins.getattr("next") else { return; };
+            let Ok(builtins) = py.import_bound("builtins") else { trigger_task_teardown(); return; };
+            let Ok(iterator) = builtins.call_method1("iter", (&content,)) else { trigger_task_teardown(); return; };
+            let Ok(next_fn) = builtins.getattr("next") else { trigger_task_teardown(); return; };
             loop {
                 match next_fn.call1((&iterator,)) {
                     Ok(item) => {
@@ -987,33 +1055,17 @@ fn build_streaming_response(
                     Err(_) => break, // StopIteration
                 }
             }
-            // Teardown generator dependencies once streaming completes
-            if let Some(td_list) = teardown_list_py {
-                if let Ok(list_bound) = td_list.bind(py).downcast::<pyo3::types::PyList>() {
-                    if !list_bound.is_empty() {
-                        if let Ok(resolver) = py.import_bound("rustapi.resolver") {
-                            if let Ok(td_fn) = resolver.getattr("teardown_dependencies") {
-                                if let Ok(coro) = td_fn.call1((list_bound,)) {
-                                    if let Ok(engine_mod) = py.import_bound("rustapi._rustapi") {
-                                        if let Ok(sched) = engine_mod.getattr("_schedule_coro") {
-                                            if let Ok(noop) = py.eval_bound("lambda *args: None", None, None) {
-                                                let _ = sched.call1((coro, noop));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            trigger_task_teardown();
         });
     });
 
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|item| (item, rx))
-    });
-    let stream_body = Body::wrap_stream::<_, hyper::body::Bytes, Infallible>(stream);
+    let stream = StreamingBodyStream {
+        rx,
+        completed,
+        teardown_list_py,
+        schedule_coro,
+    };
+    let stream_body = Body::wrap_stream(stream);
 
     let mut builder = HyperResponse::builder().status(status);
     let mut final_headers = headers;
@@ -1039,7 +1091,7 @@ async fn execute_python_handler(
     raw_string: bool,
     response_model: Option<&PyObject>,
     default_status_code: u16,
-) -> (u16, String, HashMap<String, String>) {
+) -> (u16, String, HashMap<String, String>, bool) {
     // Await coroutine if the handler is async.
     let py_result: PyResult<PyObject> = if is_async {
         match exec_res {
@@ -1066,7 +1118,7 @@ async fn execute_python_handler(
         exec_res
     };
 
-    Python::with_gil(|py| -> (u16, String, HashMap<String, String>) {
+    Python::with_gil(|py| -> (u16, String, HashMap<String, String>, bool) {
         match py_result {
             Ok(py_obj) => {
                 // Handle explicit Response wrapper. Explicit responses bypass response_model entirely.
@@ -1078,7 +1130,7 @@ async fn execute_python_handler(
                         .map(|ct| ct.contains("application/json") || ct.contains("text/"))
                         .unwrap_or(false);
                     let body_str = serialize_value(py, &resp_ref.content, serializer, is_raw || raw_string);
-                    return (status, body_str, headers);
+                    return (status, body_str, headers, false);
                 }
                 // Plain return value.
                 let filtered_obj = if let Some(model) = response_model {
@@ -1096,7 +1148,7 @@ async fn execute_python_handler(
                             let _ = dict.set_item("detail", detail);
                             let dumped = json_mod.call_method1("dumps", (dict,)).and_then(|s| s.extract::<String>())
                                 .unwrap_or_else(|_| json!({"detail": "Response validation error"}).to_string());
-                            return (500, dumped, HashMap::new());
+                            return (500, dumped, HashMap::new(), true);
                         }
                     }
                 } else {
@@ -1104,7 +1156,7 @@ async fn execute_python_handler(
                 };
                 let body_str = serialize_value(py, &filtered_obj, serializer, raw_string);
                 let final_status = if default_status_code != 0 { default_status_code } else { 200 };
-                (final_status, body_str, HashMap::new())
+                (final_status, body_str, HashMap::new(), false)
             }
             Err(err) => {
                 // 1. Inspect Python exception object
@@ -1159,13 +1211,13 @@ async fn execute_python_handler(
                     if let Ok(errors_fn) = val.getattr("errors") {
                         if let Ok(err_list) = errors_fn.call0() {
                             if let Ok(json_mod) = py.import_bound("json") {
-                                let dict = pyo3::types::PyDict::new_bound(py);
-                                let _ = dict.set_item("detail", err_list);
-                                if let Ok(dumped) = json_mod.call_method1("dumps", (dict,)) {
-                                    if let Ok(s) = dumped.extract::<String>() {
-                                        return Some((422, s));
+                                    let dict = pyo3::types::PyDict::new_bound(py);
+                                    let _ = dict.set_item("detail", err_list);
+                                    if let Ok(dumped) = json_mod.call_method1("dumps", (dict,)) {
+                                        if let Ok(s) = dumped.extract::<String>() {
+                                            return Some((422, s));
+                                        }
                                     }
-                                }
                             }
                         }
                     }
@@ -1203,7 +1255,7 @@ async fn execute_python_handler(
                 });
 
                 if let Some((code, json_str)) = custom_err {
-                    return (code, json_str, HashMap::new());
+                    return (code, json_str, HashMap::new(), true);
                 }
 
                 let err_str = err.to_string();
@@ -1212,11 +1264,11 @@ async fn execute_python_handler(
                     if let Ok(code) = part.trim().parse::<u16>() {
                         if (100..=599).contains(&code) {
                             let clean = err_str.rsplit(": ").next().unwrap_or(&err_str);
-                            return (code, json!({ "detail": clean }).to_string(), HashMap::new());
+                            return (code, json!({ "detail": clean }).to_string(), HashMap::new(), true);
                         }
                     }
                 }
-                (500, json!({ "detail": err_str }).to_string(), HashMap::new())
+                (500, json!({ "detail": err_str }).to_string(), HashMap::new(), true)
             }
         }
     })
@@ -1930,6 +1982,12 @@ def _schema_from_signature(func):
                     eprintln!("Server error: {e}");
                 }
 
+                // Wait for all in-flight dependency teardowns to complete
+                let start_wait = std::time::Instant::now();
+                while PENDING_TEARDOWNS.load(Ordering::SeqCst) > 0 && start_wait.elapsed() < Duration::from_secs(5) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+
                 // Run shutdown handlers gracefully.
                 if let Err(e) = run_lifecycle_handlers(&shutdown_handlers, &sc2, &sem2).await {
                     eprintln!("ERROR:    Application shutdown failed: {e}");
@@ -2401,7 +2459,7 @@ async fn handle_mcp(
                         })
                     }).await.unwrap_or_else(|e| Err(pyo3::exceptions::PyRuntimeError::new_err(format!("worker panicked: {e}"))));
 
-                    let (t_status, content, _) =
+                    let (t_status, content, _, _) =
                         execute_python_handler(exec_res, is_async_tool, serializer, serializer, schedule_coro, true, None, 200).await;
                     ok(json!({ "content": [{ "type": "text", "text": content }], "isError": t_status >= 400 }))
                 }
@@ -2446,6 +2504,55 @@ async fn run_dependency_teardown(
     }
 }
 
+struct ResponseBodyStream {
+    chunk: Option<hyper::body::Bytes>,
+    teardown_list_py: Option<PyObject>,
+    schedule_coro: Arc<PyObject>,
+    completed: Arc<AtomicBool>,
+}
+
+impl ResponseBodyStream {
+    fn new(bytes: Vec<u8>, td_list: PyObject, schedule_coro: Arc<PyObject>) -> Self {
+        Self {
+            chunk: Some(hyper::body::Bytes::from(bytes)),
+            teardown_list_py: Some(td_list),
+            schedule_coro,
+            completed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn trigger_teardown(&mut self) {
+        if !self.completed.swap(true, Ordering::SeqCst) {
+            if let Some(td_list) = self.teardown_list_py.take() {
+                let sc = self.schedule_coro.clone();
+                PENDING_TEARDOWNS.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    run_dependency_teardown(&td_list, &sc, Some("request")).await;
+                    PENDING_TEARDOWNS.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        }
+    }
+}
+
+impl Stream for ResponseBodyStream {
+    type Item = Result<hyper::body::Bytes, Infallible>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(chunk) = self.chunk.take() {
+            return Poll::Ready(Some(Ok(chunk)));
+        }
+        self.trigger_teardown();
+        Poll::Ready(None)
+    }
+}
+
+impl Drop for ResponseBodyStream {
+    fn drop(&mut self) {
+        self.trigger_teardown();
+    }
+}
+
 fn attach_request_teardown_to_body(
     body_bytes: Vec<u8>,
     teardown_list_py: Option<PyObject>,
@@ -2458,15 +2565,7 @@ fn attach_request_teardown_to_body(
         if !has_items {
             return Body::from(body_bytes);
         }
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<hyper::body::Bytes, Infallible>>(1);
-        tokio::spawn(async move {
-            let bytes = hyper::body::Bytes::from(body_bytes);
-            let _ = tx.send(Ok(bytes)).await;
-            run_dependency_teardown(&td_list, &schedule_coro, Some("request")).await;
-        });
-        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|item| (item, rx))
-        });
+        let stream = ResponseBodyStream::new(body_bytes, td_list, schedule_coro);
         Body::wrap_stream(stream)
     } else {
         Body::from(body_bytes)
@@ -2884,11 +2983,12 @@ async fn handle_route(
     });
 
     if let Some((status, headers, content)) = streaming_data {
-        return Ok(build_streaming_response(content, status, headers, Some(teardown_list_py)));
+        run_dependency_teardown(&teardown_list_py, schedule_coro, Some("function")).await;
+        return Ok(build_streaming_response(content, status, headers, Some(teardown_list_py), schedule_coro.clone()));
     }
 
     // -- Normal / async handler -------------------------------------------
-    let (r_status, r_body, mut r_headers) =
+    let (r_status, r_body, mut r_headers, is_exception) =
         execute_python_handler(exec_res, is_async, serializer, filter_response, schedule_coro, false, response_model.as_ref(), route_status_code).await;
 
     if !r_headers.keys().any(|k| k.eq_ignore_ascii_case("content-type")) {
@@ -2896,7 +2996,7 @@ async fn handle_route(
     }
 
     // Dependency teardown generators
-    if r_status >= 400 {
+    if is_exception {
         run_dependency_teardown(&teardown_list_py, schedule_coro, None).await;
     } else {
         run_dependency_teardown(&teardown_list_py, schedule_coro, Some("function")).await;

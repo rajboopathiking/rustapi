@@ -38,14 +38,18 @@ def get_users():
 
 @pytest.fixture(scope="module", autouse=True)
 def run_server():
-    server_thread = threading.Thread(
-        target=lambda: app.run(host=HOST, port=PORT),
-        daemon=True,
+    import subprocess, signal, sys, os
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from tests.test_response_model import app, HOST, PORT; app.run(host=HOST, port=PORT, reload=False)",
+        ],
+        start_new_session=(sys.platform != "win32"),
     )
-    server_thread.start()
 
     connected = False
-    for _ in range(20):
+    for _ in range(50):
         try:
             r = requests.get(f"{BASE}/user", timeout=1)
             if r.status_code == 200:
@@ -54,6 +58,15 @@ def run_server():
         except Exception:
             time.sleep(0.1)
     assert connected, "Server failed to start for response_model tests"
+    yield
+    try:
+        if sys.platform == "win32":
+            proc.terminate()
+        else:
+            os.killpg(proc.pid, signal.SIGINT)
+        proc.wait(timeout=3)
+    except Exception:
+        proc.kill()
 
 
 def test_single_response_model_filters_private_fields():

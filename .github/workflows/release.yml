@@ -101,7 +101,7 @@ jobs:
 
       - name: Verify installed version
         run: |
-          python -c "import rustapi; print('RustAPI version:', rustapi.__version__); assert rustapi.__version__ == '1.9.0b4'"
+          python -c "import tomllib, rustapi; print('Installed rustapi from:', rustapi.__file__); assert 'site-packages' in rustapi.__file__; meta = tomllib.load(open('pyproject.toml', 'rb')); assert rustapi.__version__ == meta['project']['version']"
 
       - name: Run full test suite
         run: |

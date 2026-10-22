@@ -44,27 +44,35 @@ def auth_json(req):
 
 @pytest.fixture(scope="module", autouse=True)
 def run_server():
-    server_thread = threading.Thread(
-        target=lambda: app.run(host=HOST, port=PORT),
-        daemon=True,
+    import subprocess, signal, sys, os
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from tests.test_responses_and_req_json import app, HOST, PORT; app.run(host=HOST, port=PORT, reload=False)",
+        ],
+        start_new_session=(sys.platform != "win32"),
     )
-    server_thread.start()
 
     connected = False
-    for _ in range(20):
+    for _ in range(50):
         try:
             r = requests.get(f"{BASE}/text", timeout=1)
             if r.status_code == 200:
                 connected = True
                 break
-            else:
-                import sys
-                print(f"DEBUG: Status code was {r.status_code}", file=sys.stderr)
-        except Exception as e:
-            import sys
-            print(f"DEBUG: Exception during connect: {type(e).__name__}: {e}", file=sys.stderr)
+        except Exception:
             time.sleep(0.1)
     assert connected, "Server failed to start for test_responses_and_req_json"
+    yield
+    try:
+        if sys.platform == "win32":
+            proc.terminate()
+        else:
+            os.killpg(proc.pid, signal.SIGINT)
+        proc.wait(timeout=3)
+    except Exception:
+        proc.kill()
 
 
 def test_html_response():

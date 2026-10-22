@@ -49,7 +49,7 @@ jobs:
         run: |
           mkdir -p /tmp/smoketest
           cd /tmp/smoketest
-          python -c "import rustapi; print('RustAPI version:', rustapi.__version__); assert rustapi.__version__ == '1.9.0b4'"
+          python -c "import tomllib, rustapi; print('Installed rustapi from:', rustapi.__file__); assert 'site-packages' in rustapi.__file__; meta = tomllib.load(open('${{ github.workspace }}/pyproject.toml', 'rb')); assert rustapi.__version__ == meta['project']['version']"
           python -c "from rustapi import FastAPI, Depends, ResponseValidationError; app = FastAPI(); print('All symbols verified successfully')"
 
       - name: Run test suite
