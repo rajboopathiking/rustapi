@@ -1015,30 +1015,13 @@ fn build_streaming_response(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<hyper::body::Bytes, Infallible>>(32);
     let completed = Arc::new(AtomicBool::new(false));
 
-    let completed_task = completed.clone();
-    let td_list_task = teardown_list_py.as_ref().map(|td| Python::with_gil(|py| td.clone_ref(py)));
-    let sc_task = schedule_coro.clone();
-
-    let trigger_task_teardown = move || {
-        if !completed_task.swap(true, Ordering::SeqCst) {
-            if let Some(td_list) = td_list_task {
-                let sc = sc_task.clone();
-                PENDING_TEARDOWNS.fetch_add(1, Ordering::SeqCst);
-                tokio::spawn(async move {
-                    run_dependency_teardown(&td_list, &sc, Some("request")).await;
-                    PENDING_TEARDOWNS.fetch_sub(1, Ordering::SeqCst);
-                });
-            }
-        }
-    };
-
     tokio::task::spawn_blocking(move || {
         Python::with_gil(|py| {
-            let Ok(builtins) = py.import_bound("builtins") else { trigger_task_teardown(); return; };
-            let Ok(iterator) = builtins.call_method1("iter", (&content,)) else { trigger_task_teardown(); return; };
-            let Ok(next_fn) = builtins.getattr("next") else { trigger_task_teardown(); return; };
+            let Ok(builtins) = py.import_bound("builtins") else { return; };
+            let Ok(iterator) = builtins.call_method1("iter", (&content,)) else { return; };
+            let Ok(next_fn) = builtins.getattr("next") else { return; };
             loop {
-                match next_fn.call1((&iterator,)) {
+                let maybe_chunk: Option<Vec<u8>> = match next_fn.call1((&iterator,)) {
                     Ok(item) => {
                         let chunk_bytes: Vec<u8> =
                             if let Ok(s) = item.downcast::<pyo3::types::PyString>() {
@@ -1048,14 +1031,27 @@ fn build_streaming_response(
                             } else {
                                 item.to_string().into_bytes()
                             };
-                        if tx.blocking_send(Ok(hyper::body::Bytes::from(chunk_bytes))).is_err() {
-                            break;
-                        }
+                        Some(chunk_bytes)
                     }
-                    Err(_) => break, // StopIteration
+                    Err(_) => None, // StopIteration
+                };
+
+                let Some(chunk_bytes) = maybe_chunk else {
+                    break;
+                };
+
+                // Release the GIL during blocking channel send to avoid freezing concurrent requests
+                // when a slow client applies backpressure.
+                let send_res = py.allow_threads(|| {
+                    tx.blocking_send(Ok(hyper::body::Bytes::from(chunk_bytes)))
+                });
+
+                if send_res.is_err() {
+                    break;
                 }
             }
-            trigger_task_teardown();
+            // Producer finishes cleanly: dropping tx signals EOF on rx once all buffered chunks are consumed.
+            // Teardown is owned exclusively by StreamingBodyStream upon completion or drop.
         });
     });
 

@@ -75,9 +75,19 @@ jobs:
   # STAGE 3: Test Gate (Require passing tests before publish)
   # ---------------------------------------------------
   test:
-    name: Test Gate Verification
+    name: Test Gate (${{ matrix.platform.os }} - ${{ matrix.platform.target }})
     needs: [build-wheels]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - os: ubuntu-latest
+            target: x86_64
+          - os: macos-latest
+            target: x86_64
+          - os: windows-latest
+            target: x64
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -87,10 +97,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Download Linux x86_64 wheel
+      - name: Download built wheel
         uses: actions/download-artifact@v4
         with:
-          name: wheels-ubuntu-latest-x86_64
+          name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist
 
       - name: Install test dependencies and built wheel
