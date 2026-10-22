@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional, Type
+from .encoders import wrap_handler_with_response_model
 
 
 class APIRouter:
@@ -39,9 +40,13 @@ class APIRouter:
         self.responses = responses or {}
         self.extra = extra
 
-    def _add(self, method: str, path: str, response_model: Optional[Type[Any]] = None, **kwargs: Any):
+    def _add(self, method: str, path: str, response_model: Optional[Type[Any]] = None, status_code: Optional[int] = None, **kwargs: Any):
+        merged_kwargs = dict(kwargs)
+        if status_code is not None:
+            merged_kwargs['status_code'] = status_code
         def decorator(func: Callable[..., Any]):
-            self.routes.append((method, path, func, response_model, kwargs))
+            wrapped = wrap_handler_with_response_model(func, response_model, **merged_kwargs)
+            self.routes.append((method, path, wrapped, response_model, merged_kwargs))
             return func
         return decorator
 
@@ -74,20 +79,20 @@ class APIRouter:
 
             self.routes.append((method, full_path, func, response_model, r_kw))
 
-    def get(self, path: str, response_model: Optional[Type[Any]] = None, **kwargs: Any):
-        return self._add("GET", path, response_model=response_model, **kwargs)
+    def get(self, path: str, response_model: Optional[Type[Any]] = None, status_code: Optional[int] = None, **kwargs: Any):
+        return self._add("GET", path, response_model=response_model, status_code=status_code, **kwargs)
 
-    def post(self, path: str, response_model: Optional[Type[Any]] = None, **kwargs: Any):
-        return self._add("POST", path, response_model=response_model, **kwargs)
+    def post(self, path: str, response_model: Optional[Type[Any]] = None, status_code: Optional[int] = None, **kwargs: Any):
+        return self._add("POST", path, response_model=response_model, status_code=status_code, **kwargs)
 
-    def put(self, path: str, response_model: Optional[Type[Any]] = None, **kwargs: Any):
-        return self._add("PUT", path, response_model=response_model, **kwargs)
+    def put(self, path: str, response_model: Optional[Type[Any]] = None, status_code: Optional[int] = None, **kwargs: Any):
+        return self._add("PUT", path, response_model=response_model, status_code=status_code, **kwargs)
 
-    def delete(self, path: str, response_model: Optional[Type[Any]] = None, **kwargs: Any):
-        return self._add("DELETE", path, response_model=response_model, **kwargs)
+    def delete(self, path: str, response_model: Optional[Type[Any]] = None, status_code: Optional[int] = None, **kwargs: Any):
+        return self._add("DELETE", path, response_model=response_model, status_code=status_code, **kwargs)
 
-    def patch(self, path: str, response_model: Optional[Type[Any]] = None, **kwargs: Any):
-        return self._add("PATCH", path, response_model=response_model, **kwargs)
+    def patch(self, path: str, response_model: Optional[Type[Any]] = None, status_code: Optional[int] = None, **kwargs: Any):
+        return self._add("PATCH", path, response_model=response_model, status_code=status_code, **kwargs)
 
     def websocket(self, path: str, **kwargs: Any):
         return self._add("WS", path, **kwargs)

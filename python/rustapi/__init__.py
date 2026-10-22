@@ -21,7 +21,7 @@ from .depends import Depends
 from .router import APIRouter
 from .background import BackgroundTasks
 from .sse import EventSourceResponse, ServerSentEvent, format_sse_event
-from .encoders import jsonable_encoder
+from .encoders import jsonable_encoder, filter_response_data, wrap_handler_with_response_model
 from .param_functions import (
     Body,
     Cookie,
@@ -45,60 +45,48 @@ class Engine(_RustEngine):
         self._route_metadata: List[Tuple[str, str, Any, List[str], Dict[str, Any]]] = []
         self._openapi_schema: Optional[Dict[str, Any]] = None
 
-    def _add_route_decorator(self, method: str, path: str, response_model: Optional[Any] = None, tags: Optional[List[str]] = None, **kwargs: Any):
+    def _add_route_decorator(
+        self,
+        method: str,
+        path: str,
+        response_model: Optional[Any] = None,
+        status_code: Optional[int] = None,
+        tags: Optional[List[str]] = None,
+        **kwargs: Any,
+    ):
         merged_kwargs = dict(kwargs)
+        if status_code is not None:
+            merged_kwargs['status_code'] = status_code
         merged_kwargs['response_model'] = response_model
         if tags:
             merged_kwargs['tags'] = tags
 
-        rust_dec = getattr(super(), method.lower())(path)
+        rust_kwargs = {k: v for k, v in merged_kwargs.items() if k != 'response_model'}
+        rust_dec = getattr(super(), method.lower())(path, response_model=response_model, **rust_kwargs)
 
         def decorator(func: Any):
-            handler_to_register = func
-            if response_model:
-                import functools
-                from typing import get_origin, get_args
-
-                actual_func = func
-
-                @functools.wraps(actual_func)
-                def response_model_wrapper(*args, **kw):
-                    res = actual_func(*args, **kw)
-                    if res is not None:
-                        if isinstance(response_model, type) and issubclass(response_model, BaseModel):
-                            if isinstance(res, list):
-                                return [response_model.model_validate(item).model_dump() for item in res]
-                            elif isinstance(res, dict):
-                                return response_model.model_validate(res).model_dump()
-                        elif hasattr(response_model, "__args__") and get_origin(response_model) in (list, tuple, set):
-                            elem_cls = get_args(response_model)[0]
-                            if isinstance(elem_cls, type) and issubclass(elem_cls, BaseModel) and isinstance(res, list):
-                                return [elem_cls.model_validate(item).model_dump() for item in res]
-                    return res
-
-                handler_to_register = response_model_wrapper
-
-            res = rust_dec(handler_to_register)
+            wrapped_handler = wrap_handler_with_response_model(func, response_model, **kwargs)
+            res = rust_dec(wrapped_handler)
             self._route_metadata.append((method, path, func, tags or [], merged_kwargs))
             self._openapi_schema = None
             return res
 
         return decorator
 
-    def get(self, path: str, response_model: Optional[Any] = None, tags: Optional[List[str]] = None, **kwargs: Any):
-        return self._add_route_decorator("GET", path, response_model=response_model, tags=tags, **kwargs)
+    def get(self, path: str, response_model: Optional[Any] = None, status_code: Optional[int] = None, tags: Optional[List[str]] = None, **kwargs: Any):
+        return self._add_route_decorator("GET", path, response_model=response_model, status_code=status_code, tags=tags, **kwargs)
 
-    def post(self, path: str, response_model: Optional[Any] = None, tags: Optional[List[str]] = None, **kwargs: Any):
-        return self._add_route_decorator("POST", path, response_model=response_model, tags=tags, **kwargs)
+    def post(self, path: str, response_model: Optional[Any] = None, status_code: Optional[int] = None, tags: Optional[List[str]] = None, **kwargs: Any):
+        return self._add_route_decorator("POST", path, response_model=response_model, status_code=status_code, tags=tags, **kwargs)
 
-    def put(self, path: str, response_model: Optional[Any] = None, tags: Optional[List[str]] = None, **kwargs: Any):
-        return self._add_route_decorator("PUT", path, response_model=response_model, tags=tags, **kwargs)
+    def put(self, path: str, response_model: Optional[Any] = None, status_code: Optional[int] = None, tags: Optional[List[str]] = None, **kwargs: Any):
+        return self._add_route_decorator("PUT", path, response_model=response_model, status_code=status_code, tags=tags, **kwargs)
 
-    def delete(self, path: str, response_model: Optional[Any] = None, tags: Optional[List[str]] = None, **kwargs: Any):
-        return self._add_route_decorator("DELETE", path, response_model=response_model, tags=tags, **kwargs)
+    def delete(self, path: str, response_model: Optional[Any] = None, status_code: Optional[int] = None, tags: Optional[List[str]] = None, **kwargs: Any):
+        return self._add_route_decorator("DELETE", path, response_model=response_model, status_code=status_code, tags=tags, **kwargs)
 
-    def patch(self, path: str, response_model: Optional[Any] = None, tags: Optional[List[str]] = None, **kwargs: Any):
-        return self._add_route_decorator("PATCH", path, response_model=response_model, tags=tags, **kwargs)
+    def patch(self, path: str, response_model: Optional[Any] = None, status_code: Optional[int] = None, tags: Optional[List[str]] = None, **kwargs: Any):
+        return self._add_route_decorator("PATCH", path, response_model=response_model, status_code=status_code, tags=tags, **kwargs)
 
 
 class FastAPI(Engine):
@@ -123,6 +111,7 @@ class FastAPI(Engine):
         terms_of_service: Optional[str] = None,
         contact: Optional[Dict[str, Any]] = None,
         license_info: Optional[Dict[str, Any]] = None,
+        lifespan: Optional[Any] = None,
         **kwargs: Any,
     ):
         super().__init__()
@@ -140,9 +129,22 @@ class FastAPI(Engine):
         self.terms_of_service = terms_of_service
         self.contact = contact
         self.license_info = license_info
+        self.lifespan = lifespan
+        self.startup_handlers: list = []
+        self.shutdown_handlers: list = []
         self.exception_handlers: Dict[Any, Any] = {}
         self.middlewares: list = []
         self.dependency_overrides: Dict[Any, Any] = {}
+
+    def on_event(self, event_type: str):
+        """Register a startup or shutdown event handler."""
+        def decorator(func: Any):
+            if event_type == "startup":
+                self.startup_handlers.append(func)
+            elif event_type == "shutdown":
+                self.shutdown_handlers.append(func)
+            return func
+        return decorator
 
     def add_middleware(self, middleware_cls: type, **kwargs: Any):
         """Add middleware (such as CORSMiddleware) to application configuration."""
@@ -406,12 +408,13 @@ class FastAPI(Engine):
             import re
             clean_path = re.sub(r'[\{\}/]', '_', path).strip('_')
 
-            response_200: Dict[str, Any] = {"description": "Successful Response"}
+            status_code_key = str(kwargs.get('status_code', 200))
+            success_response: Dict[str, Any] = {"description": "Successful Response"}
             resp_model = kwargs.get('response_model')
             if resp_model:
                 model_ref_name = _extract_model_schema(resp_model)
                 if model_ref_name:
-                    response_200["content"] = {
+                    success_response["content"] = {
                         "application/json": {
                             "schema": {"$ref": f"#/components/schemas/{model_ref_name}"}
                         }
@@ -421,7 +424,7 @@ class FastAPI(Engine):
                 "summary": kwargs.get('summary') or handler_name.replace('_', ' ').title(),
                 "operationId": f"{handler_name}_{clean_path}_{method_lower}",
                 "responses": kwargs.get('responses') or {
-                    "200": response_200,
+                    status_code_key: success_response,
                     "422": {
                         "description": "Validation Error",
                         "content": {
@@ -785,22 +788,64 @@ class FastAPI(Engine):
         """ASGI 3.0 interface implementation for ASGITransport, TestClient, uvicorn, and pytest."""
         import inspect, json
         if scope["type"] == "lifespan":
+            lifespan_ctx = None
+            if getattr(self, "lifespan", None) is not None:
+                try:
+                    lifespan_ctx = self.lifespan(self)
+                except Exception as exc:
+                    await send({"type": "lifespan.startup.failed", "message": str(exc)})
+                    return
+
             while True:
                 message = await receive()
                 if message["type"] == "lifespan.startup":
-                    for handler in getattr(self, "startup_handlers", []):
-                        if inspect.iscoroutinefunction(handler):
-                            await handler()
-                        else:
-                            handler()
-                    await send({"type": "lifespan.startup.complete"})
+                    try:
+                        if lifespan_ctx is not None:
+                            if hasattr(lifespan_ctx, "__aenter__"):
+                                await lifespan_ctx.__aenter__()
+                            elif hasattr(lifespan_ctx, "__enter__"):
+                                lifespan_ctx.__enter__()
+                            elif inspect.isasyncgen(lifespan_ctx):
+                                await lifespan_ctx.__anext__()
+                            elif inspect.isgenerator(lifespan_ctx):
+                                next(lifespan_ctx)
+
+                        for handler in getattr(self, "startup_handlers", []):
+                            if inspect.iscoroutinefunction(handler):
+                                await handler()
+                            else:
+                                handler()
+                        await send({"type": "lifespan.startup.complete"})
+                    except Exception as exc:
+                        await send({"type": "lifespan.startup.failed", "message": str(exc)})
+                        return
                 elif message["type"] == "lifespan.shutdown":
-                    for handler in getattr(self, "shutdown_handlers", []):
-                        if inspect.iscoroutinefunction(handler):
-                            await handler()
-                        else:
-                            handler()
-                    await send({"type": "lifespan.shutdown.complete"})
+                    try:
+                        for handler in getattr(self, "shutdown_handlers", []):
+                            if inspect.iscoroutinefunction(handler):
+                                await handler()
+                            else:
+                                handler()
+
+                        if lifespan_ctx is not None:
+                            if hasattr(lifespan_ctx, "__aexit__"):
+                                await lifespan_ctx.__aexit__(None, None, None)
+                            elif hasattr(lifespan_ctx, "__exit__"):
+                                lifespan_ctx.__exit__(None, None, None)
+                            elif inspect.isasyncgen(lifespan_ctx):
+                                try:
+                                    await lifespan_ctx.__anext__()
+                                except StopAsyncIteration:
+                                    pass
+                            elif inspect.isgenerator(lifespan_ctx):
+                                try:
+                                    next(lifespan_ctx)
+                                except StopIteration:
+                                    pass
+
+                        await send({"type": "lifespan.shutdown.complete"})
+                    except Exception as exc:
+                        await send({"type": "lifespan.shutdown.failed", "message": str(exc)})
                     break
             return
 
@@ -892,9 +937,21 @@ class FastAPI(Engine):
                 response_body = getattr(resp, "content", str(exc))
                 resp_headers = getattr(resp, "headers", {"content-type": "application/json"})
             else:
-                status_code = getattr(exc, "status_code", 500)
-                detail = getattr(exc, "detail", str(exc))
-                response_body = f'{{"detail": "{detail}"}}' if isinstance(detail, str) else json.dumps({"detail": detail})
+                exc_type_name = type(exc).__name__
+                if hasattr(exc, "errors") and callable(getattr(exc, "errors")):
+                    status_code = 422
+                    response_body = json.dumps({"detail": exc.errors()})
+                elif "JSONDecodeError" in exc_type_name:
+                    status_code = 422
+                    response_body = json.dumps({"detail": [{"loc": ["body"], "msg": "JSON decode error", "type": "json_invalid"}]})
+                elif hasattr(exc, "status_code"):
+                    status_code = getattr(exc, "status_code", 500)
+                    detail = getattr(exc, "detail", str(exc))
+                    response_body = json.dumps({"detail": detail})
+                else:
+                    status_code = getattr(exc, "status_code", 500)
+                    detail = getattr(exc, "detail", str(exc))
+                    response_body = json.dumps({"detail": detail})
                 resp_headers = {"content-type": "application/json"}
 
         encoded_headers = [(k.encode("latin1"), v.encode("latin1")) for k, v in resp_headers.items()]

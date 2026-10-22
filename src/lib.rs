@@ -93,6 +93,7 @@ struct RouteEntry {
     tags: Vec<String>,
     summary: Option<String>,
     description: Option<String>,
+    status_code: u16,
 }
 
 type Routes   = Arc<StdMutex<Vec<RouteEntry>>>;
@@ -268,7 +269,8 @@ fn generate_openapi(routes: &[RouteEntry]) -> String {
 
     for r in routes {
         if r.is_websocket { continue; }
-        let mut method_obj = json!({ "responses": { "200": { "description": "Successful Response" } } });
+        let sc_str = if r.status_code != 0 { r.status_code.to_string() } else { "200".to_string() };
+        let mut method_obj = json!({ "responses": { sc_str: { "description": "Successful Response" } } });
 
         let mut tags_vec = r.tags.clone();
         if tags_vec.is_empty() {
@@ -1013,6 +1015,7 @@ async fn execute_python_handler(
     schedule_coro: &PyObject,
     raw_string: bool,
     response_model: Option<&PyObject>,
+    default_status_code: u16,
 ) -> (u16, String, HashMap<String, String>) {
     // Await coroutine if the handler is async.
     let py_result: PyResult<PyObject> = if is_async {
@@ -1070,28 +1073,87 @@ async fn execute_python_handler(
                     py_obj
                 };
                 let body_str = serialize_value(py, &filtered_obj, serializer, raw_string);
-                (200, body_str, HashMap::new())
+                let final_status = if default_status_code != 0 { default_status_code } else { 200 };
+                (final_status, body_str, HashMap::new())
             }
             Err(err) => {
-                // First try direct attribute inspection on the Python exception object (e.g., HTTPException)
+                // 1. Inspect Python exception object
                 let custom_err = Python::with_gil(|py| -> Option<(u16, String)> {
                     let val = err.value_bound(py);
+
+                    // Check for status_code attribute (HTTPException)
                     if let Ok(code_obj) = val.getattr("status_code") {
                         if let Ok(code) = code_obj.extract::<u16>() {
-                            let detail_str = if let Ok(d) = val.getattr("detail") {
-                                d.to_string()
+                            let detail_obj = val.getattr("detail").ok();
+                            let json_str = if let Some(d) = detail_obj {
+                                if let Ok(s) = d.extract::<String>() {
+                                    json!({ "detail": s }).to_string()
+                                } else if let Ok(json_mod) = py.import_bound("json") {
+                                    let dict = pyo3::types::PyDict::new_bound(py);
+                                    let _ = dict.set_item("detail", d);
+                                    json_mod.call_method1("dumps", (dict,)).ok()
+                                        .and_then(|s| s.extract::<String>().ok())
+                                        .unwrap_or_else(|| json!({ "detail": val.to_string() }).to_string())
+                                } else {
+                                    json!({ "detail": val.to_string() }).to_string()
+                                }
                             } else {
-                                String::new()
+                                json!({ "detail": val.to_string() }).to_string()
                             };
-                            return Some((code, detail_str));
+                            return Some((code, json_str));
                         }
                     }
+
+                    // Check for Pydantic ValidationError (has .errors() method)
+                    if let Ok(errors_fn) = val.getattr("errors") {
+                        if let Ok(err_list) = errors_fn.call0() {
+                            if let Ok(json_mod) = py.import_bound("json") {
+                                let dict = pyo3::types::PyDict::new_bound(py);
+                                let _ = dict.set_item("detail", err_list);
+                                if let Ok(dumped) = json_mod.call_method1("dumps", (dict,)) {
+                                    if let Ok(s) = dumped.extract::<String>() {
+                                        return Some((422, s));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Check for JSONDecodeError
+                    let type_name = val.get_type().name().map(|n| n.to_string()).unwrap_or_default();
+                    if type_name.contains("JSONDecodeError") {
+                        let err_json = json!({
+                            "detail": [
+                                {
+                                    "loc": ["body"],
+                                    "msg": "JSON decode error",
+                                    "type": "json_invalid"
+                                }
+                            ]
+                        }).to_string();
+                        return Some((422, err_json));
+                    }
+
+                    // Check for RequestValidationError
+                    if type_name.contains("RequestValidationError") {
+                        if let Ok(d) = val.getattr("detail") {
+                            if let Ok(json_mod) = py.import_bound("json") {
+                                let dict = pyo3::types::PyDict::new_bound(py);
+                                let _ = dict.set_item("detail", d);
+                                if let Ok(dumped) = json_mod.call_method1("dumps", (dict,)) {
+                                    if let Ok(s) = dumped.extract::<String>() {
+                                        return Some((422, s));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     None
                 });
 
-                if let Some((code, detail)) = custom_err {
-                    let clean = detail.replace('"', "'");
-                    return (code, format!(r#"{{"detail":"{}"}}"#, clean), HashMap::new());
+                if let Some((code, json_str)) = custom_err {
+                    return (code, json_str, HashMap::new());
                 }
 
                 let err_str = err.to_string();
@@ -1099,12 +1161,12 @@ async fn execute_python_handler(
                 for part in err_str.split(": ") {
                     if let Ok(code) = part.trim().parse::<u16>() {
                         if (100..=599).contains(&code) {
-                            let clean = err_str.rsplit(": ").next().unwrap_or(&err_str).replace('"', "'");
-                            return (code, format!(r#"{{"detail":"{}"}}"#, clean), HashMap::new());
+                            let clean = err_str.rsplit(": ").next().unwrap_or(&err_str);
+                            return (code, json!({ "detail": clean }).to_string(), HashMap::new());
                         }
                     }
                 }
-                (500, format!(r#"{{"detail":"{}"}}"#, err_str.replace('"', "'")), HashMap::new())
+                (500, json!({ "detail": err_str }).to_string(), HashMap::new())
             }
         }
     })
@@ -1219,13 +1281,13 @@ def _filter_response(val, response_model):
             adapter = TypeAdapter(list[response_model])
         else:
             adapter = TypeAdapter(response_model)
-        validated = adapter.validate_python(val)
+        validated = adapter.validate_python(val, from_attributes=True)
         return adapter.dump_python(validated, mode="json")
     except Exception:
         if hasattr(response_model, "model_validate"):
             if isinstance(val, list):
-                return [response_model.model_validate(i).model_dump(mode="json") for i in val]
-            return response_model.model_validate(val).model_dump(mode="json")
+                return [response_model.model_validate(i, from_attributes=True).model_dump(mode="json") for i in val]
+            return response_model.model_validate(val, from_attributes=True).model_dump(mode="json")
         return val
 def _schema_from_signature(func):
     sig = inspect.signature(func)
@@ -1257,8 +1319,14 @@ def _schema_from_signature(func):
         let mut tags = Vec::new();
         let mut summary = None;
         let mut description = None;
+        let mut status_code: u16 = 200;
 
         if let Some(dict) = kwargs {
+            if let Ok(Some(sc_val)) = dict.get_item("status_code") {
+                if let Ok(sc) = sc_val.extract::<u16>() {
+                    status_code = sc;
+                }
+            }
             if let Ok(Some(t_val)) = dict.get_item("tags") {
                 if let Ok(t_list) = t_val.extract::<Vec<String>>() {
                     tags = t_list;
@@ -1285,6 +1353,7 @@ def _schema_from_signature(func):
             tags,
             summary,
             description,
+            status_code,
         }
     }
 
@@ -1525,6 +1594,9 @@ def _schema_from_signature(func):
                 kw.set_item("tags", merged_tags)?;
             }
             if let Some(ref r_kw) = route_kwargs {
+                if let Ok(Some(sc)) = r_kw.get_item("status_code") {
+                    kw.set_item("status_code", sc)?;
+                }
                 if let Ok(Some(s)) = r_kw.get_item("summary") {
                     kw.set_item("summary", s)?;
                 }
@@ -2171,7 +2243,7 @@ async fn handle_mcp(
                     }).await.unwrap_or_else(|e| Err(pyo3::exceptions::PyRuntimeError::new_err(format!("worker panicked: {e}"))));
 
                     let (t_status, content, _) =
-                        execute_python_handler(exec_res, is_async_tool, serializer, serializer, schedule_coro, true, None).await;
+                        execute_python_handler(exec_res, is_async_tool, serializer, serializer, schedule_coro, true, None, 200).await;
                     ok(json!({ "content": [{ "type": "text", "text": content }], "isError": t_status >= 400 }))
                 }
                 None => err(-32602, &format!("Unknown tool: {}", name)),
@@ -2209,7 +2281,7 @@ async fn handle_route(
 ) -> Result<HyperResponse<Body>, String> {
     // Extract route metadata.
     let (handler, is_async, pydantic_model, pydantic_param_name, request_param_name,
-         background_task_param_name, deps, param_names, param_types, required_params, response_model) =
+         background_task_param_name, deps, param_names, param_types, required_params, response_model, route_status_code) =
         Python::with_gil(|py| {
             let guard = routes.lock().unwrap();
             let e = &guard[idx];
@@ -2221,6 +2293,7 @@ async fn handle_route(
                 e.dependencies.clone(), e.param_names.clone(), e.param_types.clone(),
                 e.required_params.clone(),
                 e.response_model.as_ref().map(|m| m.clone_ref(py)),
+                e.status_code,
             )
         });
 
@@ -2499,7 +2572,7 @@ async fn handle_route(
 
     // -- Normal / async handler -------------------------------------------
     let (r_status, r_body, mut r_headers) =
-        execute_python_handler(exec_res, is_async, serializer, filter_response, schedule_coro, false, response_model.as_ref()).await;
+        execute_python_handler(exec_res, is_async, serializer, filter_response, schedule_coro, false, response_model.as_ref(), route_status_code).await;
 
     if !r_headers.keys().any(|k| k.eq_ignore_ascii_case("content-type")) {
         r_headers.insert("Content-Type".to_string(), "application/json".to_string());
@@ -2585,6 +2658,7 @@ struct RouteDecorator {
     tags: Vec<String>,
     summary: Option<String>,
     description: Option<String>,
+    status_code: u16,
 }
 
 #[allow(non_local_definitions)]
@@ -2752,6 +2826,7 @@ impl RouteDecorator {
             tags: self.tags.clone(),
             summary: self.summary.clone(),
             description: self.description.clone(),
+            status_code: self.status_code,
         });
         Ok(func)
     }

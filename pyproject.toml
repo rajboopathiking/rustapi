@@ -35,6 +35,7 @@ dependencies = [
 test = ["pytest>=7.0", "requests>=2.28", "pytest-html>=4.0"]
 
 [tool.pytest.ini_options]
+pythonpath = ["python"]
 # Store built-in test output artefacts under test-reports/
 addopts = [
     "-v",

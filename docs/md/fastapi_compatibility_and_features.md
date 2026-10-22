@@ -203,7 +203,75 @@ def read_current_user(token: str = Depends(oauth2_scheme)):
 
 ---
 
-## 6. Parameter Markers & `jsonable_encoder`
+## 5. Response Models & Field Filtering (`response_model`, `include`, `exclude`)
+
+RustAPI supports FastAPI-style Pydantic response models across both **sync** and **async** handlers, including explicit field exclusion and inclusion:
+
+```python
+from pydantic import BaseModel
+from rustapi import FastAPI, status
+
+app = FastAPI()
+
+class User(BaseModel):
+    id: int
+    name: str
+    email: str
+    password: str
+
+class UserPublic(BaseModel):
+    id: int
+    name: str
+
+# 1. Automatic filtering to public response model
+@app.get("/users/{user_id}", response_model=UserPublic)
+async def get_user(user_id: int):
+    # 'password' and 'email' are automatically filtered out
+    return {"id": user_id, "name": "alice", "email": "alice@example.com", "password": "hash"}
+
+# 2. Explicit field exclusion
+@app.get("/me", response_model=User, response_model_exclude={"password"})
+def get_me():
+    return {"id": 1, "name": "bob", "email": "bob@example.com", "password": "secret_hash"}
+
+# 3. Explicit HTTP status codes (e.g. 201 Created, 204 No Content)
+@app.post("/users", response_model=UserPublic, status_code=status.HTTP_201_CREATED)
+async def create_user(user: User):
+    return user
+```
+
+---
+
+## 6. Lifespan Events (`lifespan=...`) & Dependencies
+
+RustAPI conforms to the ASGI 3.0 lifespan protocol and supports FastAPI's modern context manager pattern:
+
+```python
+from contextlib import asynccontextmanager
+from rustapi import FastAPI, Depends
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Initialize resources (DB pools, HTTP clients, caches)
+    print("Application starting up...")
+    yield
+    # Shutdown: Clean up resources
+    print("Application shutting down...")
+
+app = FastAPI(lifespan=lifespan)
+
+# Standard function-scoped dependencies
+def get_current_user():
+    return {"user": "alice"}
+
+@app.get("/profile")
+def profile(user: dict = Depends(get_current_user, scope="function")):
+    return user
+```
+
+---
+
+## 7. Parameter Markers & `jsonable_encoder`
 
 Use standard FastAPI parameter placement markers and data converters:
 
