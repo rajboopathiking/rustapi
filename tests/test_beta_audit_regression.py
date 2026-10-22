@@ -106,6 +106,7 @@ async def test_router_response_model_preserves_exclusions():
 
 @pytest.mark.asyncio
 async def test_lifespan_context_startup_and_shutdown():
+    import asyncio
     lifecycle_state = {"startup": False, "shutdown": False}
 
     @asynccontextmanager
@@ -116,9 +117,18 @@ async def test_lifespan_context_startup_and_shutdown():
 
     app = FastAPI(lifespan=app_lifespan)
 
-    # Lifespan via ASGI transport
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test"):
-        assert lifecycle_state["startup"] is True
+    # Send ASGI lifespan startup and shutdown messages
+    receive_queue = asyncio.Queue()
+    await receive_queue.put({"type": "lifespan.startup"})
 
+    async def receive():
+        return await receive_queue.get()
+
+    async def send(msg):
+        if msg["type"] == "lifespan.startup.complete":
+            await receive_queue.put({"type": "lifespan.shutdown"})
+
+    await app({"type": "lifespan"}, receive, send)
+
+    assert lifecycle_state["startup"] is True
     assert lifecycle_state["shutdown"] is True

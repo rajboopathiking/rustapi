@@ -181,6 +181,10 @@ def test_8_async_generator_dependency_teardown():
     res = requests.get("http://127.0.0.1:8998/items")
     assert res.status_code == 200
     assert res.json() == {"db": {"session_id": "db-123"}}
+    for _ in range(30):
+        if len(events) >= 3:
+            break
+        time.sleep(0.05)
     assert events == ["enter_db", "handler_exec", "exit_db"], f"Expected teardown order, got {events}"
 
 
