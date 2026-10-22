@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "pyrustapi"
-version = "1.8.9"
+version = "1.9.0b1"
 description = "A FastAPI-style Python web framework with a Rust tokio/hyper core, and a built-in MCP server."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Boopathi Raj" }]
 keywords = ["web", "framework", "rust", "pyo3", "fastapi", "mcp", "asgi"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
