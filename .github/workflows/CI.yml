@@ -37,9 +37,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install maturin pytest pydantic httpx requests minijinja argon2-cffi PyJWT pyyaml
 
-      - name: Build extension with maturin
+      - name: Build and install extension
         run: |
-          maturin develop --release
+          maturin build --release --out dist
+          pip install dist/*.whl --force-reinstall
 
       - name: Run test suite
         run: |
