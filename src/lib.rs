@@ -102,6 +102,7 @@ struct RouteEntry {
     summary: Option<String>,
     description: Option<String>,
     status_code: u16,
+    rate_limit: Option<(u64, Duration)>,
 }
 
 type Routes   = Arc<StdMutex<Vec<RouteEntry>>>;
@@ -115,6 +116,38 @@ type Tools     = Arc<StdMutex<Vec<ToolEntry>>>;
 type Resources = Arc<StdMutex<Vec<ResourceEntry>>>;
 type Prompts   = Arc<StdMutex<Vec<PromptEntry>>>;
 
+#[derive(Clone, Default)]
+struct DbPools {
+    sqlite: Option<sqlx::SqlitePool>,
+    pg: Option<sqlx::PgPool>,
+}
+
+#[derive(Clone)]
+struct CachedResponse {
+    status_code: u16,
+    content_type: String,
+    body: Vec<u8>,
+    expires_at: std::time::Instant,
+}
+
+type NativeCache = Arc<StdMutex<HashMap<String, CachedResponse>>>;
+
+fn parse_rate_limit(s: &str) -> Option<(u64, Duration)> {
+    let mut parts = s.split('/');
+    let count: u64 = parts.next()?.trim().parse().ok()?;
+    let unit = parts.next()?.trim().to_lowercase();
+    let duration = match unit.as_str() {
+        "second" | "sec" | "s" => Duration::from_secs(1),
+        "minute" | "min" | "m" => Duration::from_secs(60),
+        "hour" | "hr" | "h" => Duration::from_secs(3600),
+        "day" | "d" => Duration::from_secs(86400),
+        _ => return None,
+    };
+    Some((count, duration))
+}
+
+type RateLimiter = Arc<StdMutex<HashMap<(String, String), (f64, std::time::Instant)>>>;
+
 #[derive(Clone)]
 struct NativeRouteEntry {
     method: String,
@@ -123,11 +156,14 @@ struct NativeRouteEntry {
     body: String,
     status_code: u16,
     content_type: String,
+    sql_query: Option<String>,
+    cache_ttl_secs: Option<u64>,
+    rate_limit: Option<(u64, Duration)>,
 }
 
 type NativeRoutes = Arc<StdMutex<Vec<NativeRouteEntry>>>;
 
-fn match_native_route(routes: &[NativeRouteEntry], method: &str, path: &str) -> Option<NativeRouteEntry> {
+fn match_native_route(routes: &[NativeRouteEntry], method: &str, path: &str) -> Option<(NativeRouteEntry, HashMap<String, String>)> {
     let req_segs = path_segments(path);
     for r in routes.iter() {
         if r.method != method {
@@ -141,10 +177,13 @@ fn match_native_route(routes: &[NativeRouteEntry], method: &str, path: &str) -> 
             continue;
         }
         let mut ok = true;
+        let mut params = HashMap::new();
         let seg_len = r.segments.len();
         for (i, seg) in r.segments.iter().enumerate() {
             if i == seg_len - 1 {
-                if let Segment::Wildcard(_) = seg {
+                if let Segment::Wildcard(name) = seg {
+                    let rest = if i < req_segs.len() { req_segs[i..].join("/") } else { String::new() };
+                    params.insert(name.clone(), rest);
                     break;
                 }
             }
@@ -152,17 +191,138 @@ fn match_native_route(routes: &[NativeRouteEntry], method: &str, path: &str) -> 
                 ok = false;
                 break;
             }
+            let val = req_segs[i];
             match seg {
                 Segment::Literal(l) => {
-                    if l != req_segs[i] { ok = false; break; }
+                    if l != val { ok = false; break; }
                 }
-                Segment::Param(_) => {}
-                Segment::Wildcard(_) => break,
+                Segment::Param(name) => {
+                    params.insert(name.clone(), (*val).to_string());
+                }
+                Segment::Wildcard(name) => {
+                    let rest = req_segs[i..].join("/");
+                    params.insert(name.clone(), rest);
+                    break;
+                }
             }
         }
-        if ok { return Some(r.clone()); }
+        if ok { return Some((r.clone(), params)); }
     }
     None
+}
+
+async fn execute_native_sql(
+    pools_opt: &Option<DbPools>,
+    query: &str,
+    params: &HashMap<String, String>,
+) -> (u16, String, String) {
+    let Some(pools) = pools_opt else {
+        return (500, "application/json".to_string(), r#"{"detail":"No active database pool connected"}"#.to_string());
+    };
+
+    let mut resolved_sql = query.to_string();
+    for (k, v) in params {
+        let pat_colon = format!(":{}", k);
+        let pat_brace = format!("{{{}}}", k);
+        let sanitized = if v.chars().all(|c| c.is_ascii_digit() || c == '-') {
+            v.clone()
+        } else {
+            format!("'{}'", v.replace('\'', "''"))
+        };
+        resolved_sql = resolved_sql.replace(&pat_colon, &sanitized).replace(&pat_brace, &sanitized);
+    }
+
+    let trimmed = resolved_sql.trim();
+    let is_mutation = trimmed.starts_with("INSERT") || trimmed.starts_with("insert")
+        || trimmed.starts_with("UPDATE") || trimmed.starts_with("update")
+        || trimmed.starts_with("DELETE") || trimmed.starts_with("delete");
+
+    if let Some(ref sqlite) = pools.sqlite {
+        if is_mutation {
+            match sqlx::query(&resolved_sql).execute(sqlite).await {
+                Ok(res) => (200, "application/json".to_string(), format!(r#"{{"rows_affected":{}}}"#, res.rows_affected())),
+                Err(e) => (500, "application/json".to_string(), format!(r#"{{"detail":"{}"}}"#, e.to_string().replace('"', "\\\""))),
+            }
+        } else {
+            use sqlx::{Column, Row};
+            match sqlx::query(&resolved_sql).fetch_all(sqlite).await {
+                Ok(rows) => {
+                    let mut json = String::with_capacity(rows.len() * 128);
+                    json.push('[');
+                    for (i, row) in rows.iter().enumerate() {
+                        if i > 0 { json.push(','); }
+                        json.push('{');
+                        for (j, col) in row.columns().iter().enumerate() {
+                            if j > 0 { json.push(','); }
+                            let col_name = col.name();
+                            json.push('"');
+                            json.push_str(col_name);
+                            json.push_str("\":");
+                            if let Ok(i) = row.try_get::<i64, _>(col_name) {
+                                json.push_str(&i.to_string());
+                            } else if let Ok(s) = row.try_get::<String, _>(col_name) {
+                                json.push('"');
+                                json.push_str(&s.replace('\\', "\\\\").replace('"', "\\\""));
+                                json.push('"');
+                            } else if let Ok(f) = row.try_get::<f64, _>(col_name) {
+                                json.push_str(&f.to_string());
+                            } else if let Ok(b) = row.try_get::<bool, _>(col_name) {
+                                json.push_str(if b { "true" } else { "false" });
+                            } else {
+                                json.push_str("null");
+                            }
+                        }
+                        json.push('}');
+                    }
+                    json.push(']');
+                    (200, "application/json".to_string(), json)
+                }
+                Err(e) => (500, "application/json".to_string(), format!(r#"{{"detail":"{}"}}"#, e.to_string().replace('"', "\\\""))),
+            }
+        }
+    } else if let Some(ref pg) = pools.pg {
+        if is_mutation {
+            match sqlx::query(&resolved_sql).execute(pg).await {
+                Ok(res) => (200, "application/json".to_string(), format!(r#"{{"rows_affected":{}}}"#, res.rows_affected())),
+                Err(e) => (500, "application/json".to_string(), format!(r#"{{"detail":"{}"}}"#, e.to_string().replace('"', "\\\""))),
+            }
+        } else {
+            use sqlx::{Column, Row, ValueRef};
+            match sqlx::query(&resolved_sql).fetch_all(pg).await {
+                Ok(rows) => {
+                    let mut records = Vec::new();
+                    for row in rows {
+                        let mut map = serde_json::Map::new();
+                        for col in row.columns() {
+                            let col_name = col.name();
+                            let val: serde_json::Value = match row.try_get_raw(col_name) {
+                                Ok(raw) if !raw.is_null() => {
+                                    if let Ok(i) = row.try_get::<i64, _>(col_name) {
+                                        serde_json::Value::Number(i.into())
+                                    } else if let Ok(f) = row.try_get::<f64, _>(col_name) {
+                                        serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap_or(serde_json::Number::from(0)))
+                                    } else if let Ok(b) = row.try_get::<bool, _>(col_name) {
+                                        serde_json::Value::Bool(b)
+                                    } else if let Ok(s) = row.try_get::<String, _>(col_name) {
+                                        serde_json::Value::String(s)
+                                    } else {
+                                        serde_json::Value::Null
+                                    }
+                                }
+                                _ => serde_json::Value::Null,
+                            };
+                            map.insert(col_name.to_string(), val);
+                        }
+                        records.push(serde_json::Value::Object(map));
+                    }
+                    (200, "application/json".to_string(), serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string()))
+                }
+                Err(e) => (500, "application/json".to_string(), format!(r#"{{"detail":"{}"}}"#, e.to_string().replace('"', "\\\""))),
+            }
+        }
+    } else {
+        (500, "application/json".to_string(), r#"{"detail":"No database pool available"}"#.to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -686,42 +846,174 @@ fn redoc_html() -> String {
 // Python-exposed types
 // ---------------------------------------------------------------------------
 
+type BroadcasterRegistry = Arc<StdMutex<HashMap<String, tokio::sync::broadcast::Sender<String>>>>;
+
 #[pyclass(name = "WebSocket")]
 struct PyWebSocket {
     stream: Arc<TokioMutex<tokio_tungstenite::WebSocketStream<hyper::upgrade::Upgraded>>>,
     rt: tokio::runtime::Handle,
+    broadcaster: BroadcasterRegistry,
 }
 
 #[pymethods]
 impl PyWebSocket {
     fn receive_text(&self, py: Python<'_>) -> PyResult<String> {
         let stream = self.stream.clone();
-        let rt = self.rt.clone();
-        py.allow_threads(move || {
-            rt.block_on(async move {
-                let mut lock = stream.lock().await;
-                while let Some(msg) = lock.next().await {
-                    if let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = msg {
-                        return Ok(text.to_string());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.rt.spawn(async move {
+            let mut lock = stream.lock().await;
+            while let Some(msg) = lock.next().await {
+                match msg {
+                    Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+                        let _ = tx.send(Ok(text.to_string()));
+                        return;
                     }
+                    Ok(tokio_tungstenite::tungstenite::Message::Binary(bin)) => {
+                        let _ = tx.send(Ok(String::from_utf8_lossy(&bin).to_string()));
+                        return;
+                    }
+                    Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
+                    _ => {}
                 }
-                Err(pyo3::exceptions::PyConnectionAbortedError::new_err("Connection closed"))
-            })
+            }
+            let _ = tx.send(Err("Connection closed".to_string()));
+        });
+
+        py.allow_threads(move || {
+            match rx.recv() {
+                Ok(Ok(text)) => Ok(text),
+                Ok(Err(e)) => Err(pyo3::exceptions::PyConnectionAbortedError::new_err(e)),
+                Err(_) => Err(pyo3::exceptions::PyConnectionAbortedError::new_err("Connection closed")),
+            }
         })
     }
 
     fn send_text(&self, py: Python<'_>, text: String) -> PyResult<()> {
         let stream = self.stream.clone();
-        let rt = self.rt.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.rt.spawn(async move {
+            let mut lock = stream.lock().await;
+            let res = lock.send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(res);
+        });
+
         py.allow_threads(move || {
-            rt.block_on(async move {
-                let mut lock = stream.lock().await;
-                lock.send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
-                    .await
-                    .map_err(|e| pyo3::exceptions::PyConnectionError::new_err(e.to_string()))?;
-                Ok(())
-            })
+            match rx.recv() {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(pyo3::exceptions::PyConnectionError::new_err(e)),
+                Err(_) => Err(pyo3::exceptions::PyConnectionAbortedError::new_err("Connection closed")),
+            }
         })
+    }
+
+    fn receive_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let stream = self.stream.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.rt.spawn(async move {
+            let mut lock = stream.lock().await;
+            while let Some(msg) = lock.next().await {
+                match msg {
+                    Ok(tokio_tungstenite::tungstenite::Message::Binary(bin)) => {
+                        let _ = tx.send(Ok(bin.to_vec()));
+                        return;
+                    }
+                    Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+                        let _ = tx.send(Ok(text.as_bytes().to_vec()));
+                        return;
+                    }
+                    Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
+                    _ => {}
+                }
+            }
+            let _ = tx.send(Err("Connection closed".to_string()));
+        });
+
+        let bytes_vec = py.allow_threads(move || {
+            match rx.recv() {
+                Ok(Ok(bin)) => Ok(bin),
+                Ok(Err(e)) => Err(pyo3::exceptions::PyConnectionAbortedError::new_err(e)),
+                Err(_) => Err(pyo3::exceptions::PyConnectionAbortedError::new_err("Connection closed")),
+            }
+        })?;
+        Ok(PyBytes::new_bound(py, &bytes_vec))
+    }
+
+    fn send_bytes(&self, py: Python<'_>, data: Vec<u8>) -> PyResult<()> {
+        let stream = self.stream.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.rt.spawn(async move {
+            let mut lock = stream.lock().await;
+            let res = lock.send(tokio_tungstenite::tungstenite::Message::Binary(data.into()))
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(res);
+        });
+
+        py.allow_threads(move || {
+            match rx.recv() {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(pyo3::exceptions::PyConnectionError::new_err(e)),
+                Err(_) => Err(pyo3::exceptions::PyConnectionAbortedError::new_err("Connection closed")),
+            }
+        })
+    }
+
+    fn receive_json(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let text = self.receive_text(py)?;
+        let json_mod = py.import_bound("json")?;
+        let res = json_mod.call_method1("loads", (text,))?;
+        Ok(res.unbind())
+    }
+
+    fn send_json(&self, py: Python<'_>, data: PyObject) -> PyResult<()> {
+        let json_mod = py.import_bound("json")?;
+        let text: String = json_mod.call_method1("dumps", (data,))?.extract()?;
+        self.send_text(py, text)
+    }
+
+    #[pyo3(signature = (code = 1000, reason = ""))]
+    fn close(&self, py: Python<'_>, code: u16, reason: &str) -> PyResult<()> {
+        let stream = self.stream.clone();
+        let reason_str = reason.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.rt.spawn(async move {
+            let mut lock = stream.lock().await;
+            let close_frame = tokio_tungstenite::tungstenite::protocol::frame::CloseFrame {
+                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(code),
+                reason: reason_str.into(),
+            };
+            let _ = lock.send(tokio_tungstenite::tungstenite::Message::Close(Some(close_frame))).await;
+            let _ = tx.send(());
+        });
+
+        py.allow_threads(move || {
+            let _ = rx.recv();
+            Ok(())
+        })
+    }
+
+    fn subscribe(&self, _py: Python<'_>, topic: String) -> PyResult<()> {
+        let stream = self.stream.clone();
+        let mut rx = {
+            let mut guard = self.broadcaster.lock().unwrap();
+            let tx = guard.entry(topic).or_insert_with(|| {
+                let (tx, _rx) = tokio::sync::broadcast::channel(2048);
+                tx
+            });
+            tx.subscribe()
+        };
+
+        self.rt.spawn(async move {
+            while let Ok(msg) = rx.recv().await {
+                let mut lock = stream.lock().await;
+                if lock.send(tokio_tungstenite::tungstenite::Message::Text(msg.into())).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(())
     }
 }
 
@@ -1334,6 +1626,10 @@ struct Engine {
     dependency_overrides: PyObject,
     #[pyo3(get)]
     db: Option<Py<PyDatabase>>,
+    db_pools: Arc<StdMutex<Option<DbPools>>>,
+    cache: NativeCache,
+    rate_limiter: RateLimiter,
+    broadcaster: BroadcasterRegistry,
 }
 
 #[allow(non_local_definitions)]
@@ -1388,8 +1684,11 @@ def _schedule_coro(coro, callback):
                 callback(t.result(), None)
             except BaseException as e:
                 callback(None, e)
-        t = _engine_loop.create_task(coro)
-        t.add_done_callback(done_cb)
+        try:
+            t = _engine_loop.create_task(coro)
+            t.add_done_callback(done_cb)
+        except BaseException as e:
+            callback(None, e)
     _engine_loop.call_soon_threadsafe(_run)
 
 try:
@@ -1458,7 +1757,11 @@ def _schema_from_signature(func):
             startup_handlers:      Arc::new(StdMutex::new(Vec::new())),
             shutdown_handlers:     Arc::new(StdMutex::new(Vec::new())),
             dependency_overrides: overrides,
-            db: None,
+            db:                   None,
+            db_pools:             Arc::new(StdMutex::new(None)),
+            cache:                Arc::new(StdMutex::new(HashMap::new())),
+            rate_limiter:         Arc::new(StdMutex::new(HashMap::new())),
+            broadcaster:          Arc::new(StdMutex::new(HashMap::new())),
         })
     }
 
@@ -1469,6 +1772,7 @@ def _schema_from_signature(func):
         let mut summary = None;
         let mut description = None;
         let mut status_code: u16 = 200;
+        let mut rate_limit = None;
 
         if let Some(dict) = kwargs {
             if let Ok(Some(sc_val)) = dict.get_item("status_code") {
@@ -1491,6 +1795,11 @@ def _schema_from_signature(func):
                     description = Some(d_str);
                 }
             }
+            if let Ok(Some(rl_val)) = dict.get_item("rate_limit") {
+                if let Ok(rl_str) = rl_val.extract::<String>() {
+                    rate_limit = parse_rate_limit(&rl_str);
+                }
+            }
         }
 
         RouteDecorator {
@@ -1503,6 +1812,7 @@ def _schema_from_signature(func):
             summary,
             description,
             status_code,
+            rate_limit,
         }
     }
 
@@ -1519,9 +1829,10 @@ def _schema_from_signature(func):
     #[pyo3(signature = (path, **_kwargs))]
     fn websocket(&self, path: String, _kwargs: Option<&Bound<'_, PyDict>>) -> RouteDecorator { self.make_route_decorator("GET".into(), path, true, None, _kwargs) }
 
-    #[pyo3(signature = (path, body, method="GET", status_code=200, content_type="application/json"))]
-    fn add_native_route(&self, path: String, body: String, method: &str, status_code: u16, content_type: &str) {
+    #[pyo3(signature = (path, body, method="GET", status_code=200, content_type="application/json", cache_ttl=None, rate_limit=None))]
+    fn add_native_route(&self, path: String, body: String, method: &str, status_code: u16, content_type: &str, cache_ttl: Option<u64>, rate_limit: Option<&str>) {
         let segments = parse_pattern(&path);
+        let rl = rate_limit.and_then(parse_rate_limit);
         let entry = NativeRouteEntry {
             method: method.to_uppercase(),
             _original_path: path.clone(),
@@ -1529,12 +1840,74 @@ def _schema_from_signature(func):
             body,
             status_code,
             content_type: content_type.to_string(),
+            sql_query: None,
+            cache_ttl_secs: cache_ttl,
+            rate_limit: rl,
         };
         let mut guard = self.native_routes.lock().unwrap();
         if let Some(existing) = guard.iter_mut().find(|r| r.method == entry.method && r._original_path == entry._original_path) {
             *existing = entry;
         } else {
             guard.push(entry);
+        }
+    }
+
+    #[pyo3(signature = (path, query, method="GET", status_code=200, cache_ttl=None, rate_limit=None))]
+    fn add_sql_route(&self, path: String, query: String, method: &str, status_code: u16, cache_ttl: Option<u64>, rate_limit: Option<&str>) {
+        let segments = parse_pattern(&path);
+        let rl = rate_limit.and_then(parse_rate_limit);
+        let entry = NativeRouteEntry {
+            method: method.to_uppercase(),
+            _original_path: path.clone(),
+            segments,
+            body: String::new(),
+            status_code,
+            content_type: "application/json".to_string(),
+            sql_query: Some(query),
+            cache_ttl_secs: cache_ttl,
+            rate_limit: rl,
+        };
+        let mut guard = self.native_routes.lock().unwrap();
+        if let Some(existing) = guard.iter_mut().find(|r| r.method == entry.method && r._original_path == entry._original_path) {
+            *existing = entry;
+        } else {
+            guard.push(entry);
+        }
+    }
+
+    fn clear_cache(&self) {
+        let mut guard = self.cache.lock().unwrap();
+        guard.clear();
+    }
+
+    fn cache_size(&self) -> usize {
+        let guard = self.cache.lock().unwrap();
+        guard.len()
+    }
+
+    #[pyo3(signature = (query, candidates, top_k = 5))]
+    fn vector_search(&self, query: Vec<f32>, candidates: Vec<Vec<f32>>, top_k: usize) -> PyResult<Vec<(usize, f32)>> {
+        vector_search(query, candidates, top_k)
+    }
+
+    fn cosine_similarity(&self, a: Vec<f32>, b: Vec<f32>) -> PyResult<f32> {
+        cosine_similarity(a, b)
+    }
+
+    #[pyo3(signature = (topic, message))]
+    fn broadcast(&self, py: Python<'_>, topic: String, message: PyObject) -> PyResult<usize> {
+        let msg_str: String = if let Ok(s) = message.extract::<String>(py) {
+            s
+        } else {
+            let json_mod = py.import_bound("json")?;
+            json_mod.call_method1("dumps", (message,))?.extract()?
+        };
+
+        let guard = self.broadcaster.lock().unwrap();
+        if let Some(tx) = guard.get(&topic) {
+            Ok(tx.send(msg_str).unwrap_or(0))
+        } else {
+            Ok(0)
         }
     }
 
@@ -1567,6 +1940,7 @@ def _schema_from_signature(func):
 
         let routes = self.routes.clone();
         let native_routes = self.native_routes.clone();
+        let db_pools = self.db_pools.clone();
         let serializer = Arc::new(self.serializer.clone_ref(py));
         let filter_response = Arc::new(self.filter_response_fn.clone_ref(py));
         let gil_sem = Arc::new(Semaphore::new(100));
@@ -1578,11 +1952,17 @@ def _schema_from_signature(func):
                 let guard = native_routes.lock().unwrap();
                 match_native_route(&guard, &method, &path)
             };
-            if let Some(entry) = matched_native {
+            if let Some((entry, params)) = matched_native {
+                let (status_code, content_type, body_str) = if let Some(ref q) = entry.sql_query {
+                    let pools = db_pools.lock().unwrap().clone();
+                    execute_native_sql(&pools, q, &params).await
+                } else {
+                    (entry.status_code, entry.content_type, entry.body)
+                };
                 let mut h = HashMap::new();
-                h.insert("content-type".to_string(), entry.content_type);
+                h.insert("content-type".to_string(), content_type);
                 Python::with_gil(|py| {
-                    let res_tuple: PyObject = (entry.status_code, entry.body, h).into_py(py);
+                    let res_tuple: PyObject = (status_code, body_str, h).into_py(py);
                     if let Ok(set_res) = fut_py_cb.bind(py).getattr("set_result") {
                         let _ = loop_py_cb.bind(py).call_method1("call_soon_threadsafe", (set_res, res_tuple));
                     }
@@ -1703,11 +2083,15 @@ def _schema_from_signature(func):
         })?;
 
         let db_obj = Py::new(py, PyDatabase {
-            sqlite_pool: sqlite,
-            pg_pool: pg,
+            sqlite_pool: sqlite.clone(),
+            pg_pool: pg.clone(),
         })?;
 
         self.db = Some(db_obj.clone_ref(py));
+        *self.db_pools.lock().unwrap() = Some(DbPools {
+            sqlite,
+            pg,
+        });
         Ok(db_obj)
     }
 
@@ -1902,6 +2286,10 @@ def _schema_from_signature(func):
         let filter_response_arc   = Arc::new(self.filter_response_fn.clone_ref(py));
         let schedule_coro_arc     = Arc::new(self.schedule_coro_fn.clone_ref(py));
         let dependency_overrides_arc = Arc::new(self.dependency_overrides.clone_ref(py));
+        let db_pools_arc          = self.db_pools.clone();
+        let cache_arc             = self.cache.clone();
+        let rate_limiter_arc      = self.rate_limiter.clone();
+        let broadcaster_arc       = self.broadcaster.clone();
         let num_cpus              = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         let gil_semaphore         = Arc::new(Semaphore::new(num_cpus * 2));
         let startup_handlers      = self.startup_handlers.clone();
@@ -1934,10 +2322,11 @@ def _schema_from_signature(func):
                 // Build and serve.
                 let make_svc = make_service_fn(move |conn: &hyper::server::conn::AddrStream| {
                     let remote_addr = conn.remote_addr();
-                    let (r, nr, t, res, p, s, fr, sc, sem, do_arc) = (
+                    let client_ip = remote_addr.ip().to_string();
+                    let (r, nr, t, res, p, s, fr, sc, sem, do_arc, db_p, c_arc, rl_arc, bc_arc, cip) = (
                         routes.clone(), native_routes.clone(), tools.clone(), resources.clone(), prompts.clone(),
                         serializer_arc.clone(), filter_response_arc.clone(), schedule_coro_arc.clone(), gil_semaphore.clone(),
-                        dependency_overrides_arc.clone(),
+                        dependency_overrides_arc.clone(), db_pools_arc.clone(), cache_arc.clone(), rate_limiter_arc.clone(), broadcaster_arc.clone(), client_ip,
                     );
                     async move {
                         Ok::<_, Infallible>(service_fn(move |req| {
@@ -1954,9 +2343,14 @@ def _schema_from_signature(func):
                             let p2 = p.clone();
                             let sem2 = sem.clone();
                             let do_arc2 = do_arc.clone();
+                            let db_p2 = db_p.clone();
+                            let c_arc2 = c_arc.clone();
+                            let rl_arc2 = rl_arc.clone();
+                            let bc_arc2 = bc_arc.clone();
+                            let cip2 = cip.clone();
 
                             async move {
-                                let resp = handle(req, r2, nr2, s2, fr2, sc2, t2, res2, p2, sem2, do_arc2).await;
+                                let resp = handle(req, r2, nr2, s2, fr2, sc2, t2, res2, p2, sem2, do_arc2, db_p2, c_arc2, rl_arc2, bc_arc2, cip2).await;
                                 let duration = start_time.elapsed();
                                 let status_code = resp.as_ref().map(|res| res.status().as_u16()).unwrap_or(500);
                                 let duration_ms = duration.as_secs_f64() * 1000.0;
@@ -2113,19 +2507,104 @@ async fn handle(
     prompts: Prompts,
     gil_sem: Arc<Semaphore>,
     dependency_overrides: Arc<PyObject>,
+    db_pools: Arc<StdMutex<Option<DbPools>>>,
+    cache: NativeCache,
+    rate_limiter: RateLimiter,
+    broadcaster: BroadcasterRegistry,
+    client_ip: String,
 ) -> Result<HyperResponse<Body>, Infallible> {
     let method      = req.method().to_string();
     let path        = req.uri().path().to_string();
+    let cache_key   = format!("{}:{}", method, path);
 
+    let client_ip = req.headers()
+        .get("x-forwarded-for")
+        .or_else(|| req.headers().get("x-real-ip"))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .unwrap_or(client_ip);
+
+    // 1. Check in-memory cache
+    if let Some(cached) = {
+        let guard = cache.lock().unwrap();
+        guard.get(&cache_key).and_then(|c| {
+            if std::time::Instant::now() < c.expires_at {
+                Some(c.clone())
+            } else {
+                None
+            }
+        })
+    } {
+        let resp = HyperResponse::builder()
+            .status(cached.status_code)
+            .header("content-type", cached.content_type)
+            .header("x-cache", "HIT")
+            .body(Body::from(cached.body))
+            .unwrap();
+        return Ok(resp);
+    }
+
+    // 2. Check native routes (Static or Direct SQL)
     let matched_native = {
         let guard = native_routes.lock().unwrap();
         match_native_route(&guard, &method, &path)
     };
-    if let Some(entry) = matched_native {
+    if let Some((entry, params)) = matched_native {
+        // Native route rate limiting
+        if let Some((max_reqs, window)) = entry.rate_limit {
+            let now = std::time::Instant::now();
+            let mut guard = rate_limiter.lock().unwrap();
+            let bucket = guard.entry((path.clone(), client_ip.clone())).or_insert((max_reqs as f64, now));
+            let elapsed = now.duration_since(bucket.1).as_secs_f64();
+            bucket.1 = now;
+            let refill_rate = (max_reqs as f64) / window.as_secs_f64();
+            bucket.0 = (bucket.0 + elapsed * refill_rate).min(max_reqs as f64);
+
+            if bucket.0 >= 1.0 {
+                bucket.0 -= 1.0;
+            } else {
+                let retry_after = ((1.0 - bucket.0) / refill_rate).ceil() as u64;
+                let resp = HyperResponse::builder()
+                    .status(StatusCode::TOO_MANY_REQUESTS)
+                    .header("content-type", "application/json")
+                    .header("retry-after", retry_after.max(1).to_string())
+                    .header("x-ratelimit-limit", max_reqs.to_string())
+                    .header("x-ratelimit-remaining", "0")
+                    .body(Body::from(r#"{"detail":"Too Many Requests: Rate limit exceeded"}"#))
+                    .unwrap();
+                return Ok(resp);
+            }
+        }
+
+        let (status_code, content_type, body_str) = if let Some(ref q) = entry.sql_query {
+            let pools = {
+                let guard = db_pools.lock().unwrap();
+                guard.clone()
+            };
+            execute_native_sql(&pools, q, &params).await
+        } else {
+            (entry.status_code, entry.content_type, entry.body)
+        };
+
+        let body_bytes = body_str.into_bytes();
+
+        // If route has cache TTL, save to cache
+        if let Some(ttl) = entry.cache_ttl_secs {
+            let mut guard = cache.lock().unwrap();
+            guard.insert(cache_key, CachedResponse {
+                status_code,
+                content_type: content_type.clone(),
+                body: body_bytes.clone(),
+                expires_at: std::time::Instant::now() + std::time::Duration::from_secs(ttl),
+            });
+        }
+
         let resp = HyperResponse::builder()
-            .status(entry.status_code)
-            .header("content-type", entry.content_type)
-            .body(Body::from(entry.body))
+            .status(status_code)
+            .header("content-type", content_type)
+            .header("x-cache", "MISS")
+            .body(Body::from(body_bytes))
             .unwrap();
         return Ok(resp);
     }
@@ -2170,33 +2649,53 @@ async fn handle(
                 if let Some(ws_key) = req.headers().get("sec-websocket-key").and_then(|v| v.to_str().ok()) {
                     let accept_key    = compute_websocket_accept(ws_key);
                     let sc_ws         = schedule_coro.clone();
+                    let bc_ws         = broadcaster.clone();
+                    let on_upgrade    = hyper::upgrade::on(&mut req);
                     tokio::spawn(async move {
-                        if let Ok(upgraded) = hyper::upgrade::on(&mut req).await {
+                        if let Ok(upgraded) = on_upgrade.await {
                             let ws_stream = tokio_tungstenite::WebSocketStream::from_raw_socket(
                                 upgraded,
                                 tokio_tungstenite::tungstenite::protocol::Role::Server,
                                 None,
                             ).await;
                             let ws_arc   = Arc::new(TokioMutex::new(ws_stream));
-                            let ws_pyobj = Python::with_gil(|py| {
-                                Py::new(py, PyWebSocket { stream: ws_arc, rt: tokio::runtime::Handle::current() })
-                                    .unwrap()
-                                    .into_any()
-                            });
-                            let coro = Python::with_gil(|py| {
-                                let kw = pyo3::types::PyDict::new_bound(py);
-                                let _  = kw.set_item(&ws_name, ws_pyobj.bind(py));
-                                handler.bind(py).call((), Some(&kw)).map(|b| b.unbind()).ok()
-                            });
-                            if let Some(c) = coro {
-                                let (tx, rx) = oneshot::channel();
-                                Python::with_gil(|py| {
-                                    if let Ok(cb) = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) }) {
-                                        let _ = sc_ws.bind(py).call1((c, cb));
+                            let rt_handle = tokio::runtime::Handle::current();
+                            tokio::task::spawn_blocking(move || {
+                                let ws_pyobj = Python::with_gil(|py| {
+                                    Py::new(py, PyWebSocket { stream: ws_arc, rt: rt_handle, broadcaster: bc_ws })
+                                        .unwrap()
+                                        .into_any()
+                                });
+                                let (is_coro, coro_opt) = Python::with_gil(|py| {
+                                    let kw = pyo3::types::PyDict::new_bound(py);
+                                    let _  = kw.set_item(&ws_name, ws_pyobj.bind(py));
+                                    match handler.bind(py).call((), Some(&kw)) {
+                                        Ok(res) => {
+                                            let inspect = py.import_bound("inspect").ok();
+                                            let is_coro = inspect
+                                                .and_then(|insp| insp.call_method1("iscoroutine", (&res,)).ok())
+                                                .and_then(|b| b.extract::<bool>().ok())
+                                                .unwrap_or(false);
+                                            (is_coro, Some(res.unbind()))
+                                        }
+                                        Err(e) => {
+                                            e.print_and_set_sys_last_vars(py);
+                                            (false, None)
+                                        }
                                     }
                                 });
-                                let _ = rx.await;
-                            }
+                                if is_coro {
+                                    if let Some(c) = coro_opt {
+                                        let (tx, rx) = oneshot::channel();
+                                        Python::with_gil(|py| {
+                                            if let Ok(cb) = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) }) {
+                                                let _ = sc_ws.bind(py).call1((c, cb));
+                                            }
+                                        });
+                                        let _ = rx.blocking_recv();
+                                    }
+                                }
+                            }).await.ok();
                         }
                     });
                     return Ok(
@@ -2307,6 +2806,35 @@ async fn handle(
         // User-defined route.
         match { let guard = routes.lock().unwrap(); match_route(&guard, &method, &path) } {
             Some((idx, path_params)) => {
+                let rate_limit_rule = {
+                    let guard = routes.lock().unwrap();
+                    guard.get(idx).and_then(|r| r.rate_limit)
+                };
+                if let Some((max_reqs, window)) = rate_limit_rule {
+                    let now = std::time::Instant::now();
+                    let mut guard = rate_limiter.lock().unwrap();
+                    let bucket = guard.entry((path.clone(), client_ip.clone())).or_insert((max_reqs as f64, now));
+                    let elapsed = now.duration_since(bucket.1).as_secs_f64();
+                    bucket.1 = now;
+                    let refill_rate = (max_reqs as f64) / window.as_secs_f64();
+                    bucket.0 = (bucket.0 + elapsed * refill_rate).min(max_reqs as f64);
+
+                    if bucket.0 >= 1.0 {
+                        bucket.0 -= 1.0;
+                    } else {
+                        let retry_after = ((1.0 - bucket.0) / refill_rate).ceil() as u64;
+                        let resp = HyperResponse::builder()
+                            .status(StatusCode::TOO_MANY_REQUESTS)
+                            .header("content-type", "application/json")
+                            .header("retry-after", retry_after.max(1).to_string())
+                            .header("x-ratelimit-limit", max_reqs.to_string())
+                            .header("x-ratelimit-remaining", "0")
+                            .body(Body::from(r#"{"detail":"Too Many Requests: Rate limit exceeded"}"#))
+                            .unwrap();
+                        return Ok(resp);
+                    }
+                }
+
                 let result = handle_route(
                     idx, path_params, method, path, body,
                     headers_map, cookies_map, query_params,
@@ -3062,6 +3590,7 @@ struct RouteDecorator {
     summary: Option<String>,
     description: Option<String>,
     status_code: u16,
+    rate_limit: Option<(u64, Duration)>,
 }
 
 #[allow(non_local_definitions)]
@@ -3234,6 +3763,7 @@ impl RouteDecorator {
             summary: self.summary.clone(),
             description: self.description.clone(),
             status_code: self.status_code,
+            rate_limit: self.rate_limit,
         });
         Ok(func)
     }
@@ -3531,6 +4061,69 @@ fn render_template(py: Python<'_>, template_str: String, context: PyObject) -> P
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Template Render Error: {e}")))
 }
 
+#[pyfunction]
+fn cosine_similarity(a: Vec<f32>, b: Vec<f32>) -> PyResult<f32> {
+    if a.len() != b.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Vectors must have the same dimension (got {} and {})",
+            a.len(), b.len()
+        )));
+    }
+    if a.is_empty() {
+        return Ok(0.0);
+    }
+
+    let mut dot = 0.0f32;
+    let mut norm_a = 0.0f32;
+    let mut norm_b = 0.0f32;
+
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+
+    let denom = norm_a.sqrt() * norm_b.sqrt();
+    if denom == 0.0 {
+        Ok(0.0)
+    } else {
+        Ok(dot / denom)
+    }
+}
+
+#[pyfunction(signature = (query, candidates, top_k = 5))]
+fn vector_search(query: Vec<f32>, candidates: Vec<Vec<f32>>, top_k: usize) -> PyResult<Vec<(usize, f32)>> {
+    if query.is_empty() || candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let q_norm: f32 = query.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if q_norm == 0.0 {
+        return Ok(Vec::new());
+    }
+
+    let mut scores: Vec<(usize, f32)> = Vec::with_capacity(candidates.len());
+
+    for (idx, cand) in candidates.iter().enumerate() {
+        if cand.len() != query.len() {
+            continue;
+        }
+        let mut dot = 0.0f32;
+        let mut c_norm_sq = 0.0f32;
+        for (q, c) in query.iter().zip(cand.iter()) {
+            dot += q * c;
+            c_norm_sq += c * c;
+        }
+        let c_norm = c_norm_sq.sqrt();
+        let sim = if c_norm == 0.0 { 0.0 } else { dot / (q_norm * c_norm) };
+        scores.push((idx, sim));
+    }
+
+    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scores.truncate(top_k);
+    Ok(scores)
+}
+
 // ---------------------------------------------------------------------------
 // Module registration
 // ---------------------------------------------------------------------------
@@ -3551,5 +4144,7 @@ fn _rustapi(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hash_password, m)?)?;
     m.add_function(wrap_pyfunction!(verify_password, m)?)?;
     m.add_function(wrap_pyfunction!(render_template, m)?)?;
+    m.add_function(wrap_pyfunction!(cosine_similarity, m)?)?;
+    m.add_function(wrap_pyfunction!(vector_search, m)?)?;
     Ok(())
 }

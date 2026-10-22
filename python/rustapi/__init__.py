@@ -15,6 +15,8 @@ from ._rustapi import (
     hash_password,
     verify_password,
     render_template,
+    cosine_similarity,
+    vector_search,
 )
 from .exceptions import HTTPException, ResponseValidationError, WebSocketException, WebSocketDisconnect
 from .depends import Depends
@@ -45,6 +47,52 @@ class Engine(_RustEngine):
         self._route_metadata: List[Tuple[str, str, Any, List[str], Dict[str, Any]]] = []
         self._openapi_schema: Optional[Dict[str, Any]] = None
 
+    def add_native_route(
+        self,
+        path: str,
+        body: str,
+        method: str = "GET",
+        status_code: int = 200,
+        content_type: str = "application/json",
+        cache_ttl: Optional[int] = None,
+        rate_limit: Optional[str] = None,
+    ) -> None:
+        """Register a zero-GIL static native route directly executed by Hyper in Rust."""
+        super().add_native_route(path, body, method=method, status_code=status_code, content_type=content_type, cache_ttl=cache_ttl, rate_limit=rate_limit)
+
+    def add_sql_route(
+        self,
+        path: str,
+        query: str,
+        method: str = "GET",
+        status_code: int = 200,
+        cache_ttl: Optional[int] = None,
+        rate_limit: Optional[str] = None,
+    ) -> None:
+        """Register a zero-GIL Rust-native SQL route directly connected to the database pool."""
+        super().add_sql_route(path, query, method=method, status_code=status_code, cache_ttl=cache_ttl, rate_limit=rate_limit)
+
+    def clear_cache(self) -> None:
+        """Clear all in-memory cached responses in the Rust core."""
+        super().clear_cache()
+
+    @property
+    def cache_size(self) -> int:
+        """Number of active cached entries currently held in Rust memory."""
+        return super().cache_size()
+
+    def vector_search(self, query: List[float], candidates: List[List[float]], top_k: int = 5) -> List[Tuple[int, float]]:
+        """Perform high-speed SIMD vector similarity search in compiled Rust memory."""
+        return super().vector_search(query, candidates, top_k)
+
+    def cosine_similarity(self, a: List[float], b: List[float]) -> float:
+        """Compute SIMD cosine similarity between two float vectors in compiled Rust."""
+        return super().cosine_similarity(a, b)
+
+    def broadcast(self, topic: str, message: Any) -> int:
+        """Broadcast a message to all connected WebSocket subscribers of `topic` directly in Rust."""
+        return super().broadcast(topic, message)
+
     def _add_route_decorator(
         self,
         method: str,
@@ -60,6 +108,24 @@ class Engine(_RustEngine):
         merged_kwargs['response_model'] = response_model
         if tags:
             merged_kwargs['tags'] = tags
+
+        if "sql" in kwargs:
+            sql_query = kwargs.pop("sql")
+            cache_ttl = kwargs.pop("cache_ttl", None)
+            rate_limit = kwargs.pop("rate_limit", None)
+            self.add_sql_route(
+                path,
+                sql_query,
+                method=method,
+                status_code=status_code or 200,
+                cache_ttl=cache_ttl,
+                rate_limit=rate_limit,
+            )
+            def decorator(func: Any):
+                self._route_metadata.append((method, path, func, tags or [], merged_kwargs))
+                self._openapi_schema = None
+                return func
+            return decorator
 
         rust_kwargs = {k: v for k, v in merged_kwargs.items() if k != 'response_model'}
         rust_dec = getattr(super(), method.lower())(path, response_model=None, **rust_kwargs)
@@ -1194,6 +1260,8 @@ __all__ = [
     "hash_password",
     "verify_password",
     "render_template",
+    "cosine_similarity",
+    "vector_search",
     "status",
     "jsonable_encoder",
     "Body",

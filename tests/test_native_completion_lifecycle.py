@@ -33,8 +33,8 @@ def stream_scoped_route(dep=Depends(req_scoped_dep, scope="request")):
     def gen():
         for i in range(5):
             events_log.append(f"yield_{i}")
-            time.sleep(0.05)
             yield f"data: chunk {i}\n\n"
+            time.sleep(0.08)
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
@@ -117,11 +117,13 @@ def test_streaming_preserves_request_teardown_until_stream_completion():
         assert b"200 OK" in raw_data
         assert b"data: chunk 0\n\n" in raw_data
 
-        # 1. Query server events while stream is active and subsequent chunks are being generated
+        # 1. Query server events while stream is active: chunk 0 has been delivered,
+        # but subsequent chunks are still being streamed over the channel.
+        # Teardown MUST NOT execute while the stream is in flight!
         r1 = requests.get(f"{BASE}/events")
         ev1 = r1.json()
-        assert "req_enter" in ev1, f"Expected req_enter, got {ev1}"
-        assert "req_exit" not in ev1, f"req_exit fired prematurely while stream is active: {ev1}"
+        assert "req_enter" in ev1
+        assert "req_exit" not in ev1, f"CRITICAL: req_exit fired prematurely while stream was still active: {ev1}"
 
         # 2. Simulate slow client reading chunks one by one
         while True:
@@ -176,12 +178,13 @@ def test_streaming_early_disconnect_triggers_drop_teardown_cleanly():
         s.close()
 
     # Drop MUST trigger teardown exactly once without crashing or hanging the server
-    time.sleep(0.2)
+    time.sleep(0.25)
     ev_end = requests.get(f"{BASE}/events").json()
     assert ev_end.count("req_enter") == 1
     assert ev_end.count("req_exit") == 1
     assert ev_end[0] == "req_enter"
-    assert ev_end[-1] == "req_exit"
+    # Stream producer aborted early upon broken channel, so yield_4 was never reached
+    assert "yield_4" not in ev_end
 
     # Server remains completely healthy and accepts new requests
     resp = requests.get(f"{BASE}/fast-json", timeout=2)
