@@ -89,6 +89,33 @@ class Engine(_RustEngine):
         return self._add_route_decorator("PATCH", path, response_model=response_model, status_code=status_code, tags=tags, **kwargs)
 
 
+class State:
+    """FastAPI/Starlette-compatible application state container."""
+
+    def __init__(self, state: Optional[Dict[str, Any]] = None):
+        if state is None:
+            state = {}
+        super().__setattr__("_state", state)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self._state[name] = value
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self._state[name]
+        except KeyError:
+            raise AttributeError(f"'State' object has no attribute '{name}'")
+
+    def __getitem__(self, key: str) -> Any:
+        return self._state[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._state[key] = value
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._state
+
+
 class FastAPI(Engine):
     """FastAPI-compatible application class wrapping the Rust Tokio core engine."""
 
@@ -115,6 +142,7 @@ class FastAPI(Engine):
         **kwargs: Any,
     ):
         super().__init__()
+        self.state = State()
         self.title = title
         self.description = description
         self.version = version
@@ -1127,6 +1155,7 @@ __version__ = "1.9.0b1"
 __all__ = [
     "Engine",
     "FastAPI",
+    "State",
     "Route",
     "PyRequest",
     "Request",

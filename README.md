@@ -69,6 +69,48 @@ Detailed report & reproducible scripts: [`performance-reports/rustapi_vs_fastapi
 
 ---
 
+### 🔄 Lifespan Context Manager (ML Models, DB Pools, Resource Cleanup)
+
+RustAPI supports the modern FastAPI `@asynccontextmanager` lifespan protocol across both ASGI and native Tokio `app.run()`:
+
+```python
+from contextlib import asynccontextmanager
+from rustapi import FastAPI
+
+ml_models = {}
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Load ML model or connect to database before handling requests
+    print("Loading application resources...")
+    ml_models["hero_model"] = "Loaded Model Instance"
+    yield
+    # Shutdown: Clean up resources and release memory on server exit
+    print("Cleaning up resources...")
+    ml_models.clear()
+
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/")
+async def read_root():
+    return {"model": ml_models.get("hero_model")}
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=8000)
+```
+
+---
+
+### ⚡ 5 Proven Ways to Maximize Performance
+
+1. **Pre-load Heavy Resources in `lifespan`**: Load models and connection pools once during startup rather than in request handlers.
+2. **Zero-Copy SQL with `db.query_json()`**: Stream database query results directly to client sockets without allocating Python dictionary objects.
+3. **Declare `response_model` for Compiled Serialization**: RustAPI compiles Pydantic `TypeAdapter` instances once, boosting serialization by up to **64.5%**.
+4. **Offload Health Checks to Tier 3 Native Routes**: Use `app.add_native_route("/health", ...)` for ultra-high-frequency endpoints (**96,000+ req/s**).
+5. **Scale Multi-Process Workers**: Set `workers=os.cpu_count()` in `app.run()` for multi-core parallelism.
+
+---
+
 ## 📚 Documentation Reference
 
 Detailed documentation is available in the [`docs/`](docs/) directory and project reference:

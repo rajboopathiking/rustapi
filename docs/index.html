@@ -373,6 +373,68 @@ app = rustapi.Engine()
 
       <h3>Development Auto-Reload Mode</h3>
       <pre><code>app.run(host=<span class="str">"127.0.0.1"</span>, port=<span class="num">8000</span>, reload=<span class="kw">True</span>)</code></pre>
+
+      <h2 style="font-family: var(--font-display); font-size: 1.8rem; margin-top: 36px;">🔄 Lifespan Context Manager (ML Models, DB Pools, Resource Cleanup)</h2>
+      <p style="color: var(--text-muted); font-size: 1.05rem;">
+        RustAPI provides 100% FastAPI parity for the <code>@asynccontextmanager</code> lifespan protocol. Initialize heavy ML models, connect database pools, or warm up caches before accepting traffic, and cleanly release memory on shutdown across both ASGI (Uvicorn / TestClient) and Native Rust (<code>app.run()</code>) runtimes.
+      </p>
+
+      <pre><code><span class="kw">from</span> contextlib <span class="kw">import</span> asynccontextmanager
+<span class="kw">from</span> rustapi <span class="kw">import</span> FastAPI
+
+<span class="com"># In-memory application resource storage (e.g. ML models or connection pools)</span>
+ml_models = {}
+
+<span class="dec">@asynccontextmanager</span>
+<span class="kw">async def</span> lifespan(app: FastAPI):
+    <span class="com"># 1. Startup: Load heavy ML model into memory before handling requests</span>
+    print(<span class="str">"Loading application resources..."</span>)
+    ml_models[<span class="str">"hero_model"</span>] = <span class="str">"Loaded Model Instance"</span>
+    app.state.hero_model = <span class="str">"Loaded Model Instance"</span>
+    
+    <span class="kw">yield</span>  <span class="com"># Server is active and processing requests at native speed</span>
+    
+    <span class="com"># 2. Shutdown: Free memory and close sockets on process exit</span>
+    print(<span class="str">"Cleaning up resources and releasing memory..."</span>)
+    ml_models.clear()
+
+app = FastAPI(lifespan=lifespan)
+
+<span class="dec">@app.get</span>(<span class="str">"/"</span>)
+<span class="kw">async def</span> read_root():
+    <span class="kw">return</span> {<span class="str">"model"</span>: ml_models.get(<span class="str">"hero_model"</span>)}
+
+<span class="kw">if</span> __name__ == <span class="str">"__main__"</span>:
+    app.run(host=<span class="str">"127.0.0.1"</span>, port=<span class="num">8000</span>)</code></pre>
+
+      <h2 style="font-family: var(--font-display); font-size: 1.8rem; margin-top: 36px;">⚡ 5 Proven Ways to Maximize Performance in RustAPI</h2>
+      <div class="grid-3" style="margin-top: 20px;">
+        <div class="card">
+          <div class="card-icon">🧠</div>
+          <h3>1. Pre-warm Heavy Resources</h3>
+          <p>Load ML weights and connection pools once inside <code>lifespan</code>. Never allocate heavy objects inside per-request handlers.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🚀</div>
+          <h3>2. Zero-Copy SQL Streaming</h3>
+          <p>Use <code>db.query_json()</code> to stream database rows directly from <code>sqlx</code> C-buffers to the socket, bypassing Python dict overhead.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">📦</div>
+          <h3>3. Compiled Response Models</h3>
+          <p>Always declare <code>response_model</code>. RustAPI caches Pydantic v2 TypeAdapters, speeding up response serialization by up to <strong>64.5%</strong>.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">⚡</div>
+          <h3>4. Tier 3 Native Fast-Paths</h3>
+          <p>Serve high-frequency health checks with <code>app.add_native_route("/health", ...)</code> clocking <strong>96,000+ req/sec</strong> with zero GIL.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">⚙️</div>
+          <h3>5. Multi-Core Scaling</h3>
+          <p>Set <code>workers=os.cpu_count()</code> in <code>app.run()</code> to distribute traffic evenly across all available CPU cores with native Tokio workers.</p>
+        </div>
+      </div>
     </div>
 
     <!-- ================= TAB: BENCHMARK DASHBOARD ================= -->

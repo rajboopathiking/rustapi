@@ -132,3 +132,57 @@ async def test_lifespan_context_startup_and_shutdown():
 
     assert lifecycle_state["startup"] is True
     assert lifecycle_state["shutdown"] is True
+
+
+@pytest.mark.asyncio
+async def test_user_exact_ml_model_lifespan():
+    import json
+    ml_models = {}
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Load the ML model or connect to database on startup
+        ml_models["hero_model"] = "Loaded Model Instance"
+        yield
+        # Clean up the resources and release the memory on shutdown
+        ml_models.clear()
+
+    app = FastAPI(lifespan=lifespan)
+
+    @app.get("/")
+    async def read_root():
+        return {"model": ml_models.get("hero_model")}
+
+    # 1. Simulate ASGI startup
+    receive_queue = asyncio.Queue()
+    await receive_queue.put({"type": "lifespan.startup"})
+
+    async def receive():
+        return await receive_queue.get()
+
+    async def send(msg):
+        pass
+
+    await app({"type": "lifespan"}, receive, send)
+    assert ml_models.get("hero_model") == "Loaded Model Instance"
+
+    # 2. HTTP Request to read_root endpoint
+    scope = {"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""}
+    http_resps = []
+
+    async def http_recv():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def http_send(m):
+        http_resps.append(m)
+
+    await app(scope, http_recv, http_send)
+    assert http_resps[0]["status"] == 200
+    data = json.loads(http_resps[1]["body"].decode("utf-8"))
+    assert data == {"model": "Loaded Model Instance"}
+
+    # 3. Simulate ASGI shutdown
+    await receive_queue.put({"type": "lifespan.shutdown"})
+    await app({"type": "lifespan"}, receive, send)
+    assert len(ml_models) == 0
+

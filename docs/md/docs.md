@@ -460,12 +460,50 @@ INFO:     127.0.0.1:54323 - "GET /invalid HTTP/1.1" 404 - 0.15ms
 
 ---
 
-### §9. Production Ergonomics (APIRouter & Lifespan Hooks)
+### §9. Production Ergonomics (APIRouter & Lifespan Context Manager)
+
+RustAPI supports the modern FastAPI-standard `lifespan` async context manager for robust resource management (loading ML models, initializing database pools, warming caches on startup, and releasing memory gracefully on shutdown).
+
+#### Modern Recommended Pattern: `@asynccontextmanager` Lifespan
 
 ```python
-from rustapi import Engine, APIRouter
+from contextlib import asynccontextmanager
+from rustapi import FastAPI
 
-app = Engine()
+# Simulated resource storage (e.g. ML models or connection pools)
+ml_models = {}
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 1. Startup phase: runs BEFORE server starts accepting requests
+    print("Loading application resources...")
+    ml_models["hero_model"] = "Loaded Model Instance"
+    # Or store in app.state for request-level access:
+    app.state.hero_model = "Loaded Model Instance"
+    
+    yield  # Application serves requests at full speed
+    
+    # 2. Shutdown phase: runs on Ctrl+C, SIGTERM, or process exit
+    print("Cleaning up resources and freeing memory...")
+    ml_models.clear()
+
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/")
+async def read_root():
+    return {"model": ml_models.get("hero_model")}
+
+if __name__ == "__main__":
+    # Works seamlessly in native Rust engine mode as well as ASGI (Uvicorn)
+    app.run(host="127.0.0.1", port=8000, reload=False, workers=1)
+```
+
+#### Legacy `@app.on_event` Hooks (Supported for Backwards Compatibility)
+
+```python
+from rustapi import FastAPI, APIRouter
+
+app = FastAPI()
 router = APIRouter()
 
 @router.get("/ping")
@@ -475,11 +513,11 @@ def ping():
 app.include_router(router, prefix="/api/v1")
 
 @app.on_event("startup")
-def startup_event():
+async def startup_event():
     print("App starting up...")
 
 @app.on_event("shutdown")
-def shutdown_event():
+async def shutdown_event():
     print("App shutting down...")
 ```
 
@@ -712,6 +750,71 @@ Use `pytest` with standard HTTP client libraries (`httpx` or `requests`), or moc
 def test_user_endpoint():
     app.dependency_overrides[get_db] = lambda: MockDB()
     # Execute test requests against running test server
+```
+
+---
+
+### §17. Maximum Performance Architecture & Optimization Strategies
+
+RustAPI achieves industry-leading throughput (up to **3.1x faster than FastAPI** and **7.5x faster than Express.js**) by leveraging a 3-tier architecture that minimizes Python overhead and the GIL. Below are the key strategies to extract maximum performance from your application:
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                   3-TIER PERFORMANCE HIERARCHY                         │
+├────────────────────────────────────────────────────────────────────────┤
+│ Tier 1: Optimized Python   │ Pre-compiled Pydantic schemas, orjson      │
+│         Handlers           │ SIMD serialization, dedicated loop.       │
+├────────────────────────────┼───────────────────────────────────────────┤
+│ Tier 2: Hybrid Rust        │ Zero-copy sqlx DB streaming, native JWT,  │
+│         Acceleration       │ native Argon2, MiniJinja templates.       │
+├────────────────────────────┼───────────────────────────────────────────┤
+│ Tier 3: Pure Rust Native   │ app.add_native_route() (96,000+ req/s)    │
+│         Fast-Paths         │ Zero Python GIL, zero CPython overhead.   │
+└────────────────────────────┴───────────────────────────────────────────┘
+```
+
+#### 1. Compile Response Models Once (Pydantic v2 TypeAdapter)
+RustAPI caches Pydantic `TypeAdapter` instances per route model, eliminating per-request schema reflection and validation overhead. Always declare `response_model`:
+```python
+@app.get("/items", response_model=List[ItemOut])
+def list_items():
+    return raw_data_list  # Compiled TypeAdapter serializes ~64.5% faster
+```
+
+#### 2. Zero-Copy Database Streaming (`db.query_json`)
+Standard ORMs (SQLAlchemy, Tortoise) allocate Python objects for every database row, triggering high GIL lockup and garbage collection. In RustAPI, `db.query_json()` streams directly from native `sqlx` (C/Rust buffers) directly to the Hyper TCP socket:
+```python
+@app.get("/users")
+async def get_users():
+    # Zero Python row allocation — streams 10,000+ req/s
+    return await db.query_json("SELECT id, name, email FROM users LIMIT 50")
+```
+
+#### 3. Pre-Load Heavy Resources in `lifespan`
+Avoid initializing ML models, database connection pools, or cache clients inside request handlers. Initialize them once in `lifespan`:
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Pre-warm model in memory once at startup
+    app.state.classifier = load_heavy_ml_model()
+    yield
+    app.state.classifier.unload()
+```
+
+#### 4. Offload High-Frequency Health/Metrics to Tier 3 Native Routes
+Routes like `/health`, `/ping`, or CDN cache checkers can be served directly by Hyper without ever touching the Python interpreter:
+```python
+# Serves 96,000+ req/sec at 0.57ms p95 latency:
+app.add_native_route("/health", '{"status":"ok"}', method="GET", status_code=200)
+```
+
+#### 5. Production Worker & Multi-Core Scaling
+Match the number of workers to available CPU cores for optimal Tokio thread scheduling:
+```python
+if __name__ == "__main__":
+    import os
+    workers = os.cpu_count() or 4
+    app.run(host="0.0.0.0", port=8000, reload=False, workers=workers)
 ```
 
 ---
