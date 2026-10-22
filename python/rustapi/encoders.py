@@ -157,6 +157,75 @@ def jsonable_encoder(
     return str(obj)
 
 
+_adapter_cache: Dict[Any, Any] = {}
+
+
+def get_cached_adapter(response_model: Any) -> Any:
+    """Get or compile a cached Pydantic TypeAdapter."""
+    try:
+        from pydantic import TypeAdapter
+        adapter = _adapter_cache.get(response_model)
+        if adapter is None:
+            adapter = TypeAdapter(response_model)
+            _adapter_cache[response_model] = adapter
+        return adapter
+    except Exception:
+        return None
+
+
+def compile_response_filter(
+    response_model: Any,
+    *,
+    include: Optional[Any] = None,
+    exclude: Optional[Any] = None,
+    by_alias: bool = True,
+    exclude_unset: bool = False,
+    exclude_defaults: bool = False,
+    exclude_none: bool = False,
+) -> Callable[[Any], Any]:
+    """Compile and cache a fast response serializer/validator for a response_model."""
+    if response_model is None:
+        return lambda val: val
+
+    adapter = get_cached_adapter(response_model)
+
+    def filter_fn(val: Any) -> Any:
+        from .exceptions import ResponseValidationError
+        if adapter is not None:
+            try:
+                validated = adapter.validate_python(val, from_attributes=True)
+                return adapter.dump_python(
+                    validated,
+                    mode="json",
+                    include=include,
+                    exclude=exclude,
+                    by_alias=by_alias,
+                    exclude_unset=exclude_unset,
+                    exclude_defaults=exclude_defaults,
+                    exclude_none=exclude_none,
+                )
+            except Exception as exc:
+                try:
+                    from pydantic import ValidationError as PydanticValidationError
+                    if isinstance(exc, PydanticValidationError):
+                        raise ResponseValidationError(errors=exc.errors(), body=val) from exc
+                except ImportError:
+                    pass
+                raise ResponseValidationError(errors=str(exc), body=val) from exc
+        else:
+            return jsonable_encoder(
+                val,
+                include=include,
+                exclude=exclude,
+                by_alias=by_alias,
+                exclude_unset=exclude_unset,
+                exclude_defaults=exclude_defaults,
+                exclude_none=exclude_none,
+            )
+
+    return filter_fn
+
+
 def filter_response_data(
     val: Any,
     response_model: Any,
@@ -169,116 +238,19 @@ def filter_response_data(
     exclude_none: bool = False,
 ) -> Any:
     """Filter, validate, and serialize endpoint return values against a Pydantic response_model."""
-    if val is None or response_model is None:
+    if response_model is None:
         return val
 
-    from typing import get_origin, get_args
-
-    def _dump_single(model_cls: Any, item: Any) -> Any:
-        if BaseModel is not None:
-            # If item is already a validated BaseModel
-            if isinstance(item, BaseModel):
-                if hasattr(item, "model_dump"):
-                    return item.model_dump(
-                        mode="json",
-                        include=include,
-                        exclude=exclude,
-                        by_alias=by_alias,
-                        exclude_unset=exclude_unset,
-                        exclude_defaults=exclude_defaults,
-                        exclude_none=exclude_none,
-                    )
-                else:
-                    return item.dict(
-                        include=include,
-                        exclude=exclude,
-                        by_alias=by_alias,
-                        exclude_unset=exclude_unset,
-                        exclude_defaults=exclude_defaults,
-                        exclude_none=exclude_none,
-                    )
-
-            # If model_cls is a BaseModel subclass
-            if isinstance(model_cls, type) and issubclass(model_cls, BaseModel):
-                try:
-                    if hasattr(model_cls, "model_validate"):
-                        validated = model_cls.model_validate(item, from_attributes=True)
-                        return validated.model_dump(
-                            mode="json",
-                            include=include,
-                            exclude=exclude,
-                            by_alias=by_alias,
-                            exclude_unset=exclude_unset,
-                            exclude_defaults=exclude_defaults,
-                            exclude_none=exclude_none,
-                        )
-                    elif hasattr(model_cls, "parse_obj"):
-                        validated = model_cls.parse_obj(item)
-                        return validated.dict(
-                            include=include,
-                            exclude=exclude,
-                            by_alias=by_alias,
-                            exclude_unset=exclude_unset,
-                            exclude_defaults=exclude_defaults,
-                            exclude_none=exclude_none,
-                        )
-                except Exception as exc:
-                    from .exceptions import ResponseValidationError
-                    try:
-                        from pydantic import ValidationError as PydanticValidationError
-                        if isinstance(exc, PydanticValidationError):
-                            raise ResponseValidationError(errors=exc.errors(), body=item) from exc
-                    except ImportError:
-                        pass
-                    raise ResponseValidationError(errors=str(exc), body=item) from exc
-
-        try:
-            from pydantic import TypeAdapter
-            adapter = TypeAdapter(model_cls)
-            validated = adapter.validate_python(item, from_attributes=True)
-            return adapter.dump_python(
-                validated,
-                mode="json",
-                include=include,
-                exclude=exclude,
-                by_alias=by_alias,
-                exclude_unset=exclude_unset,
-                exclude_defaults=exclude_defaults,
-                exclude_none=exclude_none,
-            )
-        except Exception as exc:
-            # If Pydantic validation failed, the handler returned invalid data → 500
-            from .exceptions import ResponseValidationError
-            try:
-                from pydantic import ValidationError as PydanticValidationError
-                if isinstance(exc, PydanticValidationError):
-                    raise ResponseValidationError(
-                        errors=exc.errors(),
-                        body=item,
-                    ) from exc
-            except ImportError:
-                pass
-            # Non-validation errors: fall back to jsonable_encoder
-            return jsonable_encoder(
-                item,
-                include=include,
-                exclude=exclude,
-                by_alias=by_alias,
-                exclude_unset=exclude_unset,
-                exclude_defaults=exclude_defaults,
-                exclude_none=exclude_none,
-            )
-
-    origin = get_origin(response_model)
-    args = get_args(response_model)
-    if origin in (list, tuple, set) and args and isinstance(val, (list, tuple, set)):
-        elem_cls = args[0]
-        return [_dump_single(elem_cls, item) for item in val]
-
-    if isinstance(val, list) and isinstance(response_model, type) and issubclass(response_model, BaseModel):
-        return [_dump_single(response_model, item) for item in val]
-
-    return _dump_single(response_model, val)
+    filter_fn = compile_response_filter(
+        response_model,
+        include=include,
+        exclude=exclude,
+        by_alias=by_alias,
+        exclude_unset=exclude_unset,
+        exclude_defaults=exclude_defaults,
+        exclude_none=exclude_none,
+    )
+    return filter_fn(val)
 
 
 def wrap_handler_with_response_model(func: Any, response_model: Any, **kwargs: Any) -> Any:
@@ -296,40 +268,32 @@ def wrap_handler_with_response_model(func: Any, response_model: Any, **kwargs: A
     exclude_defaults = kwargs.get("response_model_exclude_defaults", False)
     exclude_none = kwargs.get("response_model_exclude_none", False)
 
+    filter_fn = compile_response_filter(
+        response_model,
+        include=include,
+        exclude=exclude,
+        by_alias=by_alias,
+        exclude_unset=exclude_unset,
+        exclude_defaults=exclude_defaults,
+        exclude_none=exclude_none,
+    )
+
     if inspect.iscoroutinefunction(func):
         @functools.wraps(func)
         async def async_response_wrapper(*args: Any, **kw: Any) -> Any:
             raw_res = await func(*args, **kw)
-            # Skip filtering for explicit Response objects (JSONResponse, etc.)
+            # Skip filtering for explicit Response objects (JSONResponse, HTMLResponse, etc.)
             if hasattr(raw_res, 'status_code') and hasattr(raw_res, 'headers') and not isinstance(raw_res, (dict, list)):
                 return raw_res
-            return filter_response_data(
-                raw_res,
-                response_model,
-                include=include,
-                exclude=exclude,
-                by_alias=by_alias,
-                exclude_unset=exclude_unset,
-                exclude_defaults=exclude_defaults,
-                exclude_none=exclude_none,
-            )
+            return filter_fn(raw_res)
         return async_response_wrapper
     else:
         @functools.wraps(func)
         def sync_response_wrapper(*args: Any, **kw: Any) -> Any:
             raw_res = func(*args, **kw)
-            # Skip filtering for explicit Response objects (JSONResponse, etc.)
+            # Skip filtering for explicit Response objects (JSONResponse, HTMLResponse, etc.)
             if hasattr(raw_res, 'status_code') and hasattr(raw_res, 'headers') and not isinstance(raw_res, (dict, list)):
                 return raw_res
-            return filter_response_data(
-                raw_res,
-                response_model,
-                include=include,
-                exclude=exclude,
-                by_alias=by_alias,
-                exclude_unset=exclude_unset,
-                exclude_defaults=exclude_defaults,
-                exclude_none=exclude_none,
-            )
+            return filter_fn(raw_res)
         return sync_response_wrapper
 

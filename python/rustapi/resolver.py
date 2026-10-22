@@ -85,7 +85,8 @@ async def solve_dependency(
 
 async def teardown_dependencies(teardown_list: list):
     """Teardown (advance/close) generator dependencies after route execution."""
-    for gen in reversed(teardown_list):
+    while teardown_list:
+        gen = teardown_list.pop()
         try:
             if inspect.isasyncgen(gen):
                 try:

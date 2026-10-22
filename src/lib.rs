@@ -958,6 +958,7 @@ fn build_streaming_response(
     content: PyObject,
     status: u16,
     headers: HashMap<String, String>,
+    teardown_list_py: Option<PyObject>,
 ) -> HyperResponse<Body> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<hyper::body::Bytes, Infallible>>(32);
 
@@ -982,6 +983,18 @@ fn build_streaming_response(
                         }
                     }
                     Err(_) => break, // StopIteration
+                }
+            }
+            // Teardown generator dependencies once streaming completes
+            if let Some(td_list) = teardown_list_py {
+                if let Ok(list_bound) = td_list.bind(py).downcast::<pyo3::types::PyList>() {
+                    if !list_bound.is_empty() {
+                        if let Ok(resolver) = py.import_bound("rustapi.resolver") {
+                            if let Ok(td_fn) = resolver.getattr("teardown_dependencies") {
+                                let _ = td_fn.call1((list_bound,));
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -1333,7 +1346,7 @@ except Exception:
 
 _adapter_cache = {}
 def _filter_response(val, response_model):
-    if response_model is None or val is None:
+    if response_model is None:
         return val
     if hasattr(val, 'status_code') and hasattr(val, 'headers') and not isinstance(val, (dict, list)):
         return val
@@ -1827,6 +1840,7 @@ def _schema_from_signature(func):
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let mut shutdown_tx       = Some(shutdown_tx);
         let (done_tx, done_rx)    = mpsc::channel::<()>();
+        let (startup_tx, startup_rx) = oneshot::channel::<Result<(), String>>();
 
         let server_handle = thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -1839,8 +1853,14 @@ def _schema_from_signature(func):
                 let sc2  = schedule_coro_arc.clone();
                 let sem2 = gil_semaphore.clone();
 
-                // Run startup handlers.
-                run_lifecycle_handlers(&startup_handlers, &sc2, &sem2).await;
+                // Run startup handlers sequentially before serving.
+                let startup_res = run_lifecycle_handlers(&startup_handlers, &sc2, &sem2).await;
+                if let Err(ref e) = startup_res {
+                    eprintln!("ERROR:    Application startup failed: {e}");
+                    let _ = startup_tx.send(Err(e.clone()));
+                    return;
+                }
+                let _ = startup_tx.send(Ok(()));
 
                 // Build and serve.
                 let make_svc = make_service_fn(move |conn: &hyper::server::conn::AddrStream| {
@@ -1889,12 +1909,32 @@ def _schema_from_signature(func):
                     eprintln!("Server error: {e}");
                 }
 
-                // Run shutdown handlers.
-                run_lifecycle_handlers(&shutdown_handlers, &sc2, &sem2).await;
+                // Run shutdown handlers gracefully.
+                if let Err(e) = run_lifecycle_handlers(&shutdown_handlers, &sc2, &sem2).await {
+                    eprintln!("ERROR:    Application shutdown failed: {e}");
+                }
             });
 
             let _ = done_tx.send(());
         });
+
+        // Ensure startup completes successfully before serving requests
+        let startup_res = py.allow_threads(|| startup_rx.blocking_recv());
+        match startup_res {
+            Ok(Ok(())) => {}
+            Ok(Err(err_msg)) => {
+                let _ = server_handle.join();
+                return Python::with_gil(|_py| {
+                    Err(pyo3::exceptions::PyRuntimeError::new_err(format!("Application startup failed: {err_msg}")))
+                });
+            }
+            Err(_) => {
+                let _ = server_handle.join();
+                return Python::with_gil(|_py| {
+                    Err(pyo3::exceptions::PyRuntimeError::new_err("Application startup thread terminated unexpectedly"))
+                });
+            }
+        }
 
         // Poll Python signals on the main thread so Ctrl-C works.
         let pending_err = py.allow_threads(move || {
@@ -1934,7 +1974,7 @@ async fn run_lifecycle_handlers(
     handlers: &Handlers,
     schedule_coro: &Arc<PyObject>,
     gil_sem: &Arc<Semaphore>,
-) {
+) -> Result<(), String> {
     let list = Python::with_gil(|py| {
         handlers.lock().unwrap().iter().map(|(h, a)| (h.clone_ref(py), *a)).collect::<Vec<_>>()
     });
@@ -1942,26 +1982,44 @@ async fn run_lifecycle_handlers(
         if is_async {
             let coro: Result<PyObject, PyErr> =
                 Python::with_gil(|py| handler.bind(py).call0().map(|v| v.into()));
-            if let Ok(c) = coro {
-                let (tx, rx) = oneshot::channel();
-                let sc = schedule_coro.clone();
-                Python::with_gil(|py| {
-                    if let Ok(cb) = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) }) {
-                        let _ = sc.bind(py).call1((c, cb));
+            match coro {
+                Ok(c) => {
+                    let (tx, rx) = oneshot::channel();
+                    let sc = schedule_coro.clone();
+                    let spawn_res = Python::with_gil(|py| -> PyResult<()> {
+                        let cb = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) })?;
+                        sc.bind(py).call1((c, cb))?;
+                        Ok(())
+                    });
+                    if let Err(e) = spawn_res {
+                        return Err(e.to_string());
                     }
-                });
-                let _ = rx.await;
+                    match rx.await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(err_obj)) => {
+                            let err_str = Python::with_gil(|py| err_obj.bind(py).to_string());
+                            return Err(err_str);
+                        }
+                        Err(_) => return Err("Coroutine dropped or cancelled".to_string()),
+                    }
+                }
+                Err(e) => return Err(e.to_string()),
             }
         } else {
             let sem  = gil_sem.clone();
-            tokio::task::spawn_blocking(move || {
+            let res = tokio::task::spawn_blocking(move || {
                 let _permit = sem.try_acquire();
-                Python::with_gil(|py| { let _ = handler.bind(py).call0(); });
+                Python::with_gil(|py| handler.bind(py).call0().map(|_| ()).map_err(|e| e.to_string()))
             })
             .await
-            .unwrap();
+            .map_err(|e| format!("Lifecycle handler panicked: {e}"))?;
+
+            if let Err(e) = res {
+                return Err(e);
+            }
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2337,6 +2395,32 @@ async fn handle_mcp(
 // User-defined route handler
 // ---------------------------------------------------------------------------
 
+async fn run_dependency_teardown(
+    teardown_list_py: &PyObject,
+    schedule_coro: &Arc<PyObject>,
+) {
+    let teardown_coro = Python::with_gil(|py| -> Option<PyObject> {
+        let list_bound = teardown_list_py.bind(py).downcast::<pyo3::types::PyList>().ok()?;
+        if list_bound.is_empty() {
+            return None;
+        }
+        let resolver = py.import_bound("rustapi.resolver").ok()?;
+        let teardown_fn = resolver.getattr("teardown_dependencies").ok()?;
+        teardown_fn.call1((list_bound,)).map(|c| c.unbind()).ok()
+    });
+
+    if let Some(coro) = teardown_coro {
+        let (tx, rx) = oneshot::channel();
+        let sc = schedule_coro.clone();
+        Python::with_gil(|py| {
+            if let Ok(cb) = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) }) {
+                let _ = sc.bind(py).call1((coro, cb));
+            }
+        });
+        let _ = rx.await;
+    }
+}
+
 /// Returns `Ok(HyperResponse)` for both normal and streaming responses.
 /// Returns `Err(String)` only for hard dependency/task errors before the handler runs.
 async fn handle_route(
@@ -2500,6 +2584,7 @@ async fn handle_route(
     }
 
     if let Some(err_resp) = dependency_error_response {
+        run_dependency_teardown(&teardown_list_py, schedule_coro).await;
         return Ok(err_resp);
     }
 
@@ -2743,7 +2828,7 @@ async fn handle_route(
     });
 
     if let Some((status, headers, content)) = streaming_data {
-        return Ok(build_streaming_response(content, status, headers));
+        return Ok(build_streaming_response(content, status, headers, Some(teardown_list_py)));
     }
 
     // -- Normal / async handler -------------------------------------------
@@ -2754,29 +2839,8 @@ async fn handle_route(
         r_headers.insert("Content-Type".to_string(), "application/json".to_string());
     }
 
-    // Dependency teardown generators (fire-and-forget, runs after response is dispatched).
-    let teardown_coro = Python::with_gil(|py| -> Option<PyObject> {
-        let list_bound = teardown_list_py.bind(py).downcast::<pyo3::types::PyList>().ok()?;
-        if list_bound.is_empty() {
-            return None;
-        }
-        let resolver = py.import_bound("rustapi.resolver").ok()?;
-        let teardown_fn = resolver.getattr("teardown_dependencies").ok()?;
-        teardown_fn.call1((list_bound,)).map(|c| c.unbind()).ok()
-    });
-
-    if let Some(coro) = teardown_coro {
-        let sc = schedule_coro.clone();
-        tokio::spawn(async move {
-            let (tx, rx) = oneshot::channel();
-            Python::with_gil(|py| {
-                if let Ok(cb) = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) }) {
-                    let _ = sc.bind(py).call1((coro, cb));
-                }
-            });
-            let _ = rx.await;
-        });
-    }
+    // Dependency teardown generators: clean up before completing response
+    run_dependency_teardown(&teardown_list_py, schedule_coro).await;
 
     // Background tasks.
     if let Some(bg_obj) = bg_tasks_obj {

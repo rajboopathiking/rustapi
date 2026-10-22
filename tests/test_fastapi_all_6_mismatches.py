@@ -113,7 +113,8 @@ def test_6_upload_file_sync_and_async_methods():
     asyncio.run(_test())
 
 
-def test_7_openapi_security_schemes_and_http_exception_status_codes():
+@pytest.mark.asyncio
+async def test_7_openapi_security_schemes_and_http_exception_status_codes():
     app = FastAPI()
     oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
     bearer_scheme = HTTPBearer()
@@ -128,35 +129,27 @@ def test_7_openapi_security_schemes_and_http_exception_status_codes():
     def admin_logs(token: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
         return {"logs": []}
 
-    def run_server():
-        app.run(host="127.0.0.1", port=8994)
-
-    t = threading.Thread(target=run_server, daemon=True)
-    t.start()
-    time.sleep(1.5)
-
     # 1. Test OpenAPI securitySchemes generation
-    res_openapi = requests.get("http://127.0.0.1:8994/openapi.json")
-    assert res_openapi.status_code == 200
-    openapi_doc = res_openapi.json()
+    openapi_doc = app.openapi()
     assert "components" in openapi_doc
     assert "securitySchemes" in openapi_doc["components"]
     schemes = openapi_doc["components"]["securitySchemes"]
     assert "OAuth2PasswordBearer" in schemes or "HTTPBearer" in schemes
 
     # 2. Test HTTPException status code propagation (401 instead of 500)
-    res_unauth = requests.get("http://127.0.0.1:8994/secure/me")
-    assert res_unauth.status_code == 401
-    assert "Not authenticated" in res_unauth.json()["detail"] or "Unauthorized" in res_unauth.json()["detail"]
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        res_unauth = await client.get("/secure/me")
+        assert res_unauth.status_code == 401
+        assert "Not authenticated" in res_unauth.json()["detail"] or "Unauthorized" in res_unauth.json()["detail"]
 
 
-def test_8_async_generator_dependency_teardown():
+@pytest.mark.asyncio
+async def test_8_async_generator_dependency_teardown():
     """Verify async generator dependencies (e.g. async def get_db(): yield db) teardown cleanly."""
-    import threading, time, requests
     from rustapi import FastAPI, Depends
 
     app = FastAPI(title="Async Generator Teardown Test")
-
     events = []
 
     async def get_db_session():
@@ -171,20 +164,12 @@ def test_8_async_generator_dependency_teardown():
         events.append("handler_exec")
         return {"db": db}
 
-    def run_server():
-        app.run(host="127.0.0.1", port=8998)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.get("/items")
+        assert res.status_code == 200
+        assert res.json() == {"db": {"session_id": "db-123"}}
 
-    t = threading.Thread(target=run_server, daemon=True)
-    t.start()
-    time.sleep(1.5)
-
-    res = requests.get("http://127.0.0.1:8998/items")
-    assert res.status_code == 200
-    assert res.json() == {"db": {"session_id": "db-123"}}
-    for _ in range(30):
-        if len(events) >= 3:
-            break
-        time.sleep(0.05)
     assert events == ["enter_db", "handler_exec", "exit_db"], f"Expected teardown order, got {events}"
 
 

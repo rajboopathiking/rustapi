@@ -178,6 +178,9 @@ class FastAPI(Engine):
         """Start the server, hooking lifespan and Python event handlers into the Rust engine."""
         import inspect as _inspect
 
+        # Compile OpenAPI documentation schemas before running
+        self.openapi()
+
         # Hook lifespan context manager into startup/shutdown handlers
         if getattr(self, 'lifespan', None) is not None:
             _lifespan_ctx_holder = [None]
@@ -803,11 +806,6 @@ class FastAPI(Engine):
 
         return schema
 
-    def run(self, host: str = "127.0.0.1", port: int = 8000, reload: bool = False, workers: int = 1):
-        """Run application with native Rust Tokio/Hyper server."""
-        self.openapi()
-        super().run(host=host, port=port, reload=reload, workers=workers)
-
     def _get_swagger_ui_html(self) -> str:
         """Generate Swagger UI HTML with Authorize button support."""
         params: Dict[str, Any] = {
@@ -1151,7 +1149,7 @@ class RedirectResponse(Response):
         return Response.__new__(cls, content="", status_code=status_code, headers=h)
 
 
-__version__ = "1.9.0b2"
+__version__ = "1.9.0b3"
 __all__ = [
     "Engine",
     "FastAPI",

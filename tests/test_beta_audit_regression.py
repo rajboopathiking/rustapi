@@ -1,10 +1,13 @@
+import asyncio
+import json
+from typing import List, Optional
+from contextlib import asynccontextmanager
 import pytest
 from pydantic import BaseModel, Field
 from rustapi import FastAPI, APIRouter
 from rustapi.responses import JSONResponse
 from rustapi.exceptions import ResponseValidationError
 from httpx import ASGITransport, AsyncClient
-from contextlib import asynccontextmanager
 
 
 class ItemModel(BaseModel):
@@ -16,6 +19,35 @@ class ItemModel(BaseModel):
 class StrictModel(BaseModel):
     name: str
     age: int
+
+
+# Subclass models for testing field stripping
+class UserOut(BaseModel):
+    id: int
+    name: str
+
+
+class UserInDB(UserOut):
+    password: str
+    salt: str = "random_salt"
+
+
+class RoleOut(BaseModel):
+    role_name: str
+
+
+class RoleInDB(RoleOut):
+    role_secret: str
+
+
+class MemberOut(BaseModel):
+    user: UserOut
+    role: RoleOut
+
+
+class MemberInDB(BaseModel):
+    user: UserInDB
+    role: RoleInDB
 
 
 @pytest.mark.asyncio
@@ -105,8 +137,127 @@ async def test_router_response_model_preserves_exclusions():
 
 
 @pytest.mark.asyncio
+async def test_subclass_single_instance_extra_fields_stripped():
+    """Returning a model subclass must not expose additional fields such as password."""
+    app = FastAPI()
+
+    @app.get("/user", response_model=UserOut)
+    def get_user():
+        return UserInDB(id=1, name="Alice", password="super_secret_password")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/user")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data == {"id": 1, "name": "Alice"}
+        assert "password" not in data
+        assert "salt" not in data
+
+
+@pytest.mark.asyncio
+async def test_subclass_list_instances_extra_fields_stripped():
+    """Returning a list of model subclasses must not expose additional fields."""
+    app = FastAPI()
+
+    @app.get("/users", response_model=List[UserOut])
+    def get_users():
+        return [
+            UserInDB(id=1, name="Alice", password="pwd1"),
+            UserInDB(id=2, name="Bob", password="pwd2"),
+        ]
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/users")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data == [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+        for item in data:
+            assert "password" not in item
+            assert "salt" not in item
+
+
+@pytest.mark.asyncio
+async def test_subclass_nested_model_extra_fields_stripped():
+    """Returning nested model subclasses must not expose additional fields."""
+    app = FastAPI()
+
+    @app.get("/member", response_model=MemberOut)
+    def get_member():
+        return MemberInDB(
+            user=UserInDB(id=42, name="Charlie", password="nested_secret"),
+            role=RoleInDB(role_name="Admin", role_secret="top_secret_role"),
+        )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/member")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data == {
+            "user": {"id": 42, "name": "Charlie"},
+            "role": {"role_name": "Admin"},
+        }
+        assert "password" not in data["user"]
+        assert "role_secret" not in data["role"]
+
+
+@pytest.mark.asyncio
+async def test_non_nullable_response_model_returning_none_yields_500():
+    """A non-nullable response model returning None must produce HTTP 500."""
+    app = FastAPI()
+
+    @app.get("/none-strict", response_model=UserOut)
+    def get_none():
+        return None
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/none-strict")
+        assert resp.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_explicitly_nullable_response_model_returning_none_yields_200():
+    """Explicitly nullable models must accept None and return 200."""
+    app = FastAPI()
+
+    @app.get("/none-nullable", response_model=Optional[UserOut])
+    def get_none_nullable():
+        return None
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/none-nullable")
+        assert resp.status_code == 200
+        assert resp.json() is None
+
+
+@pytest.mark.asyncio
+async def test_request_validation_error_is_422_distinct_from_response_500():
+    """Invalid request input must return 422; invalid server output must return 500."""
+    app = FastAPI()
+
+    @app.post("/items", response_model=UserOut)
+    def create_item(item: StrictModel):
+        return UserOut(id=item.age, name=item.name)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Invalid client input (missing required 'age') -> 422
+        resp_input_invalid = await client.post("/items", json={"name": "Alice"})
+        assert resp_input_invalid.status_code == 422
+        assert "detail" in resp_input_invalid.json()
+
+        # Valid client input -> 200
+        resp_valid = await client.post("/items", json={"name": "Alice", "age": 25})
+        assert resp_valid.status_code == 200
+        assert resp_valid.json() == {"id": 25, "name": "Alice"}
+
+
+@pytest.mark.asyncio
 async def test_lifespan_context_startup_and_shutdown():
-    import asyncio
     lifecycle_state = {"startup": False, "shutdown": False}
 
     @asynccontextmanager
@@ -117,26 +268,32 @@ async def test_lifespan_context_startup_and_shutdown():
 
     app = FastAPI(lifespan=app_lifespan)
 
-    # Send ASGI lifespan startup and shutdown messages
+    # Coordinate ASGI lifespan concurrently with timeout
     receive_queue = asyncio.Queue()
-    await receive_queue.put({"type": "lifespan.startup"})
+    startup_complete_event = asyncio.Event()
 
     async def receive():
         return await receive_queue.get()
 
     async def send(msg):
         if msg["type"] == "lifespan.startup.complete":
-            await receive_queue.put({"type": "lifespan.shutdown"})
+            startup_complete_event.set()
 
-    await app({"type": "lifespan"}, receive, send)
+    lifespan_task = asyncio.create_task(app({"type": "lifespan"}, receive, send))
 
+    # Send startup message
+    await receive_queue.put({"type": "lifespan.startup"})
+    await asyncio.wait_for(startup_complete_event.wait(), timeout=5.0)
     assert lifecycle_state["startup"] is True
+
+    # Send shutdown message and await task completion
+    await receive_queue.put({"type": "lifespan.shutdown"})
+    await asyncio.wait_for(lifespan_task, timeout=5.0)
     assert lifecycle_state["shutdown"] is True
 
 
 @pytest.mark.asyncio
 async def test_user_exact_ml_model_lifespan():
-    import json
     ml_models = {}
 
     @asynccontextmanager
@@ -153,20 +310,25 @@ async def test_user_exact_ml_model_lifespan():
     async def read_root():
         return {"model": ml_models.get("hero_model")}
 
-    # 1. Simulate ASGI startup
+    # Coordinate lifespan concurrently:
     receive_queue = asyncio.Queue()
-    await receive_queue.put({"type": "lifespan.startup"})
+    startup_complete_event = asyncio.Event()
 
     async def receive():
         return await receive_queue.get()
 
     async def send(msg):
-        pass
+        if msg["type"] == "lifespan.startup.complete":
+            startup_complete_event.set()
 
-    await app({"type": "lifespan"}, receive, send)
+    lifespan_task = asyncio.create_task(app({"type": "lifespan"}, receive, send))
+
+    # 1. Startup
+    await receive_queue.put({"type": "lifespan.startup"})
+    await asyncio.wait_for(startup_complete_event.wait(), timeout=5.0)
     assert ml_models.get("hero_model") == "Loaded Model Instance"
 
-    # 2. HTTP Request to read_root endpoint
+    # 2. HTTP Request while server is live
     scope = {"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""}
     http_resps = []
 
@@ -181,8 +343,7 @@ async def test_user_exact_ml_model_lifespan():
     data = json.loads(http_resps[1]["body"].decode("utf-8"))
     assert data == {"model": "Loaded Model Instance"}
 
-    # 3. Simulate ASGI shutdown
+    # 3. Shutdown
     await receive_queue.put({"type": "lifespan.shutdown"})
-    await app({"type": "lifespan"}, receive, send)
+    await asyncio.wait_for(lifespan_task, timeout=5.0)
     assert len(ml_models) == 0
-

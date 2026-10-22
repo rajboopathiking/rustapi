@@ -1,6 +1,5 @@
 # Rust
 /target/
-Cargo.lock
 
 # Python
 __pycache__/
@@ -21,6 +20,8 @@ build/
 .vscode/
 .idea/
 *.log
+scratch/
+test-reports/
 
 # Local docs & references
 fastapi_docs/
