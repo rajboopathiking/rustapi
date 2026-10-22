@@ -29,7 +29,7 @@
 
 ---
 
-### ⚡ Framework Standing & Capability Comparison
+### ⚡ Framework Standing & Multi-Framework Benchmarks
 
 `rustapi` delivers **100% FastAPI developer experience (DX)** while running on a **high-performance Rust (Tokio/Hyper) core engine**.
 
@@ -45,16 +45,27 @@
 └───────────────────────────────────────────────────────────┘
 ```
 
-| Capability | FastAPI | RustAPI (`pyrustapi`) | `rustapi` Advantage |
-| :--- | :---: | :---: | :--- |
-| **API Syntax (`@app.get`, `Depends`, `APIRouter`)** | ✅ | ✅ | 100% drop-in API compatibility |
-| **Interactive Docs (`/docs`, `/redoc`)** | ✅ | ✅ | Swagger UI & ReDoc served natively |
-| **SSE Real-Time AI Streaming** | ✅ | ✅ | Low-latency token streaming for LLMs |
-| **Single-Page App Serving (`app.frontend`)** | ❌ Manual | ✅ | Zero-config React/Vite/Svelte dist serving |
-| **Embedded DB Engine (`sqlx`)** | ❌ None | ✅ | Native C/Rust DB pool with zero-copy JSON |
-| **Rust Security Primitives (Argon2/JWT)** | ❌ External | ✅ | Built-in high-speed C-extension primitives |
-| **Model Context Protocol (MCP Server)** | ❌ External | ✅ | Built-in AI Agent MCP server (`POST /mcp`) |
-| **Peak Throughput (Native Fast-Paths)** | ~5k req/s | **50,000+ req/s** | Zero-GIL Tokio execution for critical routes |
+#### 📊 Empirical Benchmark Results (`oha` Load Generator, $c=32$)
+
+Measured under identical business logic and schemas across Python and Node.js frameworks:
+
+| Workload Scenario | FastAPI (`uvloop`) | Express.js | RustAPI (v1.8.9) | Fastify (Node.js) | RustAPI Native Tier 3 |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Sync JSON** (`GET /json`) | 3,417 req/s | 12,873 req/s | **10,178 req/s** *(⚡ 3.0x vs FastAPI)* | 17,063 req/s | **🚀 96,386 req/s** *(⚡ 7.5x vs Express)* |
+| **Async JSON** (`GET /async_json`) | 5,430 req/s | 13,638 req/s | **8,117 req/s** *(⚡ 1.5x vs FastAPI)* | 17,122 req/s | N/A |
+| **Validated POST** (`POST /items`) | 2,762 req/s | 10,529 req/s | **8,621 req/s** *(⚡ 3.1x vs FastAPI)* | 13,463 req/s | N/A |
+| **Response Model (50 items)** (`GET /users`) | 1,916 req/s | 10,072 req/s | **1,928 req/s** *(⚡ Lower p95)* | 11,145 req/s | N/A |
+| **High Concurrency** (`c=100`) | 6,088 req/s | 12,637 req/s | **7,571 req/s** *(⚡ 1.25x vs FastAPI)* | 15,523 req/s | N/A |
+
+Detailed report & reproducible scripts: [`performance-reports/rustapi_vs_fastapi_vs_nodejs.md`](performance-reports/rustapi_vs_fastapi_vs_nodejs.md)
+
+---
+
+### 🏛️ The 3-Tier Execution Model
+
+1. **Tier 1 (FastAPI Drop-in)**: Standard Python `@app.get()`, `async def`, Pydantic models, and dependencies.
+2. **Tier 2 (Hybrid Rust Acceleration)**: Standard Python handlers utilizing native Rust power primitives (`db.query_json()` SQLite/PostgreSQL streaming, `rustapi.encode_jwt()`, `rustapi.hash_password()`, MiniJinja templates).
+3. **Tier 3 (Pure Rust Native Fast-Path)**: Zero-GIL C-speed routes registered with `app.add_native_route("/health", ...)` clocking **96,000+ req/sec** at **0.57ms p95 latency**.
 
 ---
 

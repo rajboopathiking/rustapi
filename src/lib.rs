@@ -1180,8 +1180,19 @@ fn serialize_value(py: Python<'_>, obj: &PyObject, serializer: &PyObject, raw_st
         if let Ok(s) = obj.downcast_bound::<pyo3::types::PyString>(py) {
             return s.to_string();
         }
+        if let Ok(b) = obj.downcast_bound::<pyo3::types::PyBytes>(py) {
+            return String::from_utf8_lossy(b.as_bytes()).into_owned();
+        }
     }
-    serializer.bind(py).call1((obj,)).unwrap().extract().unwrap_or_default()
+    if let Ok(res) = serializer.bind(py).call1((obj,)) {
+        if let Ok(b) = res.downcast::<pyo3::types::PyBytes>() {
+            return String::from_utf8_lossy(b.as_bytes()).into_owned();
+        }
+        if let Ok(s) = res.extract::<String>() {
+            return s;
+        }
+    }
+    String::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -1259,28 +1270,55 @@ impl Engine {
     fn new(py: Python<'_>) -> PyResult<Self> {
         let python_code = r#"
 import asyncio, inspect, json, threading
-_engine_loop = asyncio.new_event_loop()
+
+try:
+    import uvloop
+    _engine_loop = uvloop.new_event_loop()
+except Exception:
+    _engine_loop = asyncio.new_event_loop()
+
 def _start_engine_loop():
     asyncio.set_event_loop(_engine_loop)
     _engine_loop.run_forever()
+
 threading.Thread(target=_start_engine_loop, daemon=True).start()
+
 def _schedule_coro(coro, callback):
-    def done_cb(fut):
-        try: callback(fut.result(), None)
-        except Exception as e: callback(None, e)
-    fut = asyncio.run_coroutine_threadsafe(coro, _engine_loop)
-    fut.add_done_callback(done_cb)
-def _serialize_response(val):
-    return json.dumps(val, default=lambda o: o.model_dump() if hasattr(o, "model_dump") else str(o))
+    def _run():
+        def done_cb(t):
+            try:
+                callback(t.result(), None)
+            except BaseException as e:
+                callback(None, e)
+        t = _engine_loop.create_task(coro)
+        t.add_done_callback(done_cb)
+    _engine_loop.call_soon_threadsafe(_run)
+
+try:
+    import orjson
+    def _serialize_response(val):
+        if isinstance(val, (dict, list, int, float, bool)):
+            return orjson.dumps(val)
+        return orjson.dumps(val, default=lambda o: o.model_dump() if hasattr(o, "model_dump") else str(o))
+except Exception:
+    def _serialize_response(val):
+        return json.dumps(val, default=lambda o: o.model_dump() if hasattr(o, "model_dump") else str(o))
+
+_adapter_cache = {}
 def _filter_response(val, response_model):
     if response_model is None or val is None:
         return val
     try:
         from pydantic import TypeAdapter
-        if isinstance(val, list) and hasattr(response_model, "model_validate"):
-            adapter = TypeAdapter(list[response_model])
-        else:
-            adapter = TypeAdapter(response_model)
+        is_list = isinstance(val, list) and hasattr(response_model, "model_validate")
+        cache_key = (response_model, is_list)
+        adapter = _adapter_cache.get(cache_key)
+        if adapter is None:
+            if is_list:
+                adapter = TypeAdapter(list[response_model])
+            else:
+                adapter = TypeAdapter(response_model)
+            _adapter_cache[cache_key] = adapter
         validated = adapter.validate_python(val, from_attributes=True)
         return adapter.dump_python(validated, mode="json")
     except Exception:
@@ -1289,6 +1327,7 @@ def _filter_response(val, response_model):
                 return [response_model.model_validate(i, from_attributes=True).model_dump(mode="json") for i in val]
             return response_model.model_validate(val, from_attributes=True).model_dump(mode="json")
         return val
+
 def _schema_from_signature(func):
     sig = inspect.signature(func)
     props = {name: {"type": "string"} for name in sig.parameters}
@@ -2455,7 +2494,7 @@ async fn handle_route(
 
     let permit = sem_c.acquire_owned().await.ok();
 
-    let exec_res: PyResult<PyObject> = tokio::task::spawn_blocking(move || {
+    let exec_res: PyResult<PyObject> = if is_async {
         let _permit = permit;
         Python::with_gil(|py| -> PyResult<PyObject> {
             let kwargs = pyo3::types::PyDict::new_bound(py);
@@ -2551,9 +2590,107 @@ async fn handle_route(
 
             handler.bind(py).call((), Some(&kwargs)).map(|v| v.into())
         })
-    })
-    .await
-    .unwrap_or_else(|e| Err(pyo3::exceptions::PyRuntimeError::new_err(format!("worker thread panicked: {e}"))));
+    } else {
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            Python::with_gil(|py| -> PyResult<PyObject> {
+                let kwargs = pyo3::types::PyDict::new_bound(py);
+
+                // Enforce required parameters presence.
+                for req_p in &required_params_c {
+                    if !path_params_c.contains_key(req_p)
+                        && !query_params_c.contains_key(req_p)
+                        && !form_c.contains_key(req_p)
+                        && !files_c.contains_key(req_p)
+                    {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!("422: Missing required parameter '{}'", req_p)));
+                    }
+                }
+
+                // Type-coercing parameter binder (path + query + form).
+                let apply_params = |params: &HashMap<String, String>| -> Result<(), String> {
+                    for (k, v) in params {
+                        if !param_names_c.contains(k) { continue; }
+                        match param_types.get(k).unwrap_or(&ParamType::String) {
+                            ParamType::Int => {
+                                v.parse::<i64>().map(|n| kwargs.set_item(k, n).map_err(|e| e.to_string()))
+                                    .map_err(|_| format!("Parameter '{}' must be an integer", k))??;
+                            }
+                            ParamType::Float => {
+                                v.parse::<f64>().map(|n| kwargs.set_item(k, n).map_err(|e| e.to_string()))
+                                    .map_err(|_| format!("Parameter '{}' must be a float", k))??;
+                            }
+                            ParamType::Bool => {
+                                let b = match v.to_lowercase().as_str() {
+                                    "true" | "1"  => true,
+                                    "false" | "0" => false,
+                                    _ => return Err(format!("Parameter '{}' must be a boolean", k)),
+                                };
+                                kwargs.set_item(k, b).map_err(|e| e.to_string())?;
+                            }
+                            ParamType::String => {
+                                kwargs.set_item(k, v).map_err(|e| e.to_string())?;
+                            }
+                        }
+                    }
+                    Ok(())
+                };
+
+                if let Err(e) = apply_params(&path_params_c)  { return Err(pyo3::exceptions::PyValueError::new_err(format!("422: {}", e))); }
+                if let Err(e) = apply_params(&query_params_c) { return Err(pyo3::exceptions::PyValueError::new_err(format!("422: {}", e))); }
+                if let Err(e) = apply_params(&form_c)         { return Err(pyo3::exceptions::PyValueError::new_err(format!("422: {}", e))); }
+
+                for (k, v_list) in &files_c {
+                    if param_names_c.contains(k) {
+                        if v_list.len() == 1 {
+                            let py_file = Py::new(py, v_list[0].clone())?;
+                            kwargs.set_item(k, py_file)?;
+                        } else if !v_list.is_empty() {
+                            let py_list = pyo3::types::PyList::empty_bound(py);
+                            for f in v_list {
+                                let py_file = Py::new(py, f.clone())?;
+                                py_list.append(py_file)?;
+                            }
+                            kwargs.set_item(k, py_list)?;
+                        }
+                    }
+                }
+
+                for (k, v) in resolved_args { kwargs.set_item(k, v)?; }
+
+                if let Some(req_name) = request_param_name {
+                    let req_obj = Py::new(py, PyRequest {
+                        method: method_c, path: path_c, path_params: path_params_c,
+                        query_params: query_params_c, headers: headers_c, cookies: cookies_c,
+                        form: form_c, files: files_c, body: body_c.clone(),
+                    })?;
+                    kwargs.set_item(req_name, req_obj)?;
+                }
+
+                if let Some(ref model) = pydantic_model {
+                    let py_dict = if body_c.is_empty() {
+                        pyo3::types::PyDict::new_bound(py).into_any()
+                    } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body_c) {
+                        serde_to_pyobject(py, &val)?.into_bound(py)
+                    } else {
+                        py.import_bound("json")?.call_method1("loads", (&body_c,))?.into_any()
+                    };
+                    let instance = model.bind(py).call_method1("model_validate", (py_dict,))?;
+                    if let Some(model_name) = pydantic_param_name {
+                        kwargs.set_item(model_name, instance)?;
+                    }
+                }
+
+                if let (Some(bg_name), Some(bg_obj)) = (bg_param_name_c, bg_obj_for_call) {
+                    kwargs.set_item(bg_name, bg_obj.bind(py))?;
+                }
+
+                handler.bind(py).call((), Some(&kwargs)).map(|v| v.into())
+            })
+        })
+        .await
+        .unwrap_or_else(|e| Err(pyo3::exceptions::PyRuntimeError::new_err(format!("worker thread panicked: {e}"))))
+    };
 
     // -- StreamingResponse fast-path (single canonical check) -------------
     let streaming_data = Python::with_gil(|py| {

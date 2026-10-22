@@ -25,3 +25,7 @@ build/
 # Local docs & references
 fastapi_docs/
 fastapi/
+
+# Node
+node_modules/
+
