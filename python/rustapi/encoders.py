@@ -200,27 +200,37 @@ def filter_response_data(
 
             # If model_cls is a BaseModel subclass
             if isinstance(model_cls, type) and issubclass(model_cls, BaseModel):
-                if hasattr(model_cls, "model_validate"):
-                    validated = model_cls.model_validate(item, from_attributes=True)
-                    return validated.model_dump(
-                        mode="json",
-                        include=include,
-                        exclude=exclude,
-                        by_alias=by_alias,
-                        exclude_unset=exclude_unset,
-                        exclude_defaults=exclude_defaults,
-                        exclude_none=exclude_none,
-                    )
-                elif hasattr(model_cls, "parse_obj"):
-                    validated = model_cls.parse_obj(item)
-                    return validated.dict(
-                        include=include,
-                        exclude=exclude,
-                        by_alias=by_alias,
-                        exclude_unset=exclude_unset,
-                        exclude_defaults=exclude_defaults,
-                        exclude_none=exclude_none,
-                    )
+                try:
+                    if hasattr(model_cls, "model_validate"):
+                        validated = model_cls.model_validate(item, from_attributes=True)
+                        return validated.model_dump(
+                            mode="json",
+                            include=include,
+                            exclude=exclude,
+                            by_alias=by_alias,
+                            exclude_unset=exclude_unset,
+                            exclude_defaults=exclude_defaults,
+                            exclude_none=exclude_none,
+                        )
+                    elif hasattr(model_cls, "parse_obj"):
+                        validated = model_cls.parse_obj(item)
+                        return validated.dict(
+                            include=include,
+                            exclude=exclude,
+                            by_alias=by_alias,
+                            exclude_unset=exclude_unset,
+                            exclude_defaults=exclude_defaults,
+                            exclude_none=exclude_none,
+                        )
+                except Exception as exc:
+                    from .exceptions import ResponseValidationError
+                    try:
+                        from pydantic import ValidationError as PydanticValidationError
+                        if isinstance(exc, PydanticValidationError):
+                            raise ResponseValidationError(errors=exc.errors(), body=item) from exc
+                    except ImportError:
+                        pass
+                    raise ResponseValidationError(errors=str(exc), body=item) from exc
 
         try:
             from pydantic import TypeAdapter
@@ -236,7 +246,19 @@ def filter_response_data(
                 exclude_defaults=exclude_defaults,
                 exclude_none=exclude_none,
             )
-        except Exception:
+        except Exception as exc:
+            # If Pydantic validation failed, the handler returned invalid data → 500
+            from .exceptions import ResponseValidationError
+            try:
+                from pydantic import ValidationError as PydanticValidationError
+                if isinstance(exc, PydanticValidationError):
+                    raise ResponseValidationError(
+                        errors=exc.errors(),
+                        body=item,
+                    ) from exc
+            except ImportError:
+                pass
+            # Non-validation errors: fall back to jsonable_encoder
             return jsonable_encoder(
                 item,
                 include=include,
@@ -278,6 +300,9 @@ def wrap_handler_with_response_model(func: Any, response_model: Any, **kwargs: A
         @functools.wraps(func)
         async def async_response_wrapper(*args: Any, **kw: Any) -> Any:
             raw_res = await func(*args, **kw)
+            # Skip filtering for explicit Response objects (JSONResponse, etc.)
+            if hasattr(raw_res, 'status_code') and hasattr(raw_res, 'headers') and not isinstance(raw_res, (dict, list)):
+                return raw_res
             return filter_response_data(
                 raw_res,
                 response_model,
@@ -293,6 +318,9 @@ def wrap_handler_with_response_model(func: Any, response_model: Any, **kwargs: A
         @functools.wraps(func)
         def sync_response_wrapper(*args: Any, **kw: Any) -> Any:
             raw_res = func(*args, **kw)
+            # Skip filtering for explicit Response objects (JSONResponse, etc.)
+            if hasattr(raw_res, 'status_code') and hasattr(raw_res, 'headers') and not isinstance(raw_res, (dict, list)):
+                return raw_res
             return filter_response_data(
                 raw_res,
                 response_model,

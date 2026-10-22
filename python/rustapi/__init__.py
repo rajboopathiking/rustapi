@@ -16,7 +16,7 @@ from ._rustapi import (
     verify_password,
     render_template,
 )
-from .exceptions import HTTPException, WebSocketException, WebSocketDisconnect
+from .exceptions import HTTPException, ResponseValidationError, WebSocketException, WebSocketDisconnect
 from .depends import Depends
 from .router import APIRouter
 from .background import BackgroundTasks
@@ -62,7 +62,7 @@ class Engine(_RustEngine):
             merged_kwargs['tags'] = tags
 
         rust_kwargs = {k: v for k, v in merged_kwargs.items() if k != 'response_model'}
-        rust_dec = getattr(super(), method.lower())(path, response_model=response_model, **rust_kwargs)
+        rust_dec = getattr(super(), method.lower())(path, response_model=None, **rust_kwargs)
 
         def decorator(func: Any):
             wrapped_handler = wrap_handler_with_response_model(func, response_model, **kwargs)
@@ -146,14 +146,81 @@ class FastAPI(Engine):
             return func
         return decorator
 
+    def run(self, host: str = "127.0.0.1", port: int = 8000, reload: bool = False, workers: int = 1):
+        """Start the server, hooking lifespan and Python event handlers into the Rust engine."""
+        import inspect as _inspect
+
+        # Hook lifespan context manager into startup/shutdown handlers
+        if getattr(self, 'lifespan', None) is not None:
+            _lifespan_ctx_holder = [None]
+
+            async def _lifespan_startup():
+                _lifespan_ctx_holder[0] = self.lifespan(self)
+                ctx = _lifespan_ctx_holder[0]
+                if hasattr(ctx, '__aenter__'):
+                    await ctx.__aenter__()
+                elif hasattr(ctx, '__enter__'):
+                    ctx.__enter__()
+                elif _inspect.isasyncgen(ctx):
+                    await ctx.__anext__()
+                elif _inspect.isgenerator(ctx):
+                    next(ctx)
+
+            async def _lifespan_shutdown():
+                ctx = _lifespan_ctx_holder[0]
+                if ctx is None:
+                    return
+                if hasattr(ctx, '__aexit__'):
+                    await ctx.__aexit__(None, None, None)
+                elif hasattr(ctx, '__exit__'):
+                    ctx.__exit__(None, None, None)
+                elif _inspect.isasyncgen(ctx):
+                    try:
+                        await ctx.__anext__()
+                    except StopAsyncIteration:
+                        pass
+                elif _inspect.isgenerator(ctx):
+                    try:
+                        next(ctx)
+                    except StopIteration:
+                        pass
+
+            self.startup_handlers.insert(0, _lifespan_startup)
+            self.shutdown_handlers.append(_lifespan_shutdown)
+
+        # Sync Python-side startup/shutdown handlers into Rust engine
+        for handler in self.startup_handlers:
+            super().on_event("startup")(handler)
+        for handler in self.shutdown_handlers:
+            super().on_event("shutdown")(handler)
+
+        super().run(host=host, port=port, reload=reload, workers=workers)
+
     def add_middleware(self, middleware_cls: type, **kwargs: Any):
         """Add middleware (such as CORSMiddleware) to application configuration."""
         self.middlewares.append((middleware_cls, kwargs))
 
     def include_router(self, router: 'APIRouter', prefix: str = "", tags: Optional[List[str]] = None, **kwargs: Any) -> None:
         """Include an APIRouter and capture route metadata for OpenAPI generation."""
+        # Strip response_model from route tuples before passing to Rust to prevent
+        # double-filtering (Python wrapper already handles response filtering).
+        original_routes = list(getattr(router, 'routes', []))
+        stripped_routes = []
+        for entry in original_routes:
+            if len(entry) >= 5:
+                m, p, h, _rm, kw = entry
+                stripped_routes.append((m, p, h, None, kw))
+            elif len(entry) >= 4:
+                stripped_routes.append((*entry[:3], None))
+            else:
+                stripped_routes.append(entry)
+        router.routes = stripped_routes
+
         # Call the parent Rust Engine include_router to register routes
         super().include_router(router, prefix, tags=tags, **kwargs)
+
+        # Restore original routes for subsequent use
+        router.routes = original_routes
 
         # Capture route metadata for OpenAPI generation
         router_prefix = getattr(router, 'prefix', '')
@@ -938,7 +1005,10 @@ class FastAPI(Engine):
                 resp_headers = getattr(resp, "headers", {"content-type": "application/json"})
             else:
                 exc_type_name = type(exc).__name__
-                if hasattr(exc, "errors") and callable(getattr(exc, "errors")):
+                if exc_type_name == "ResponseValidationError":
+                    status_code = 500
+                    response_body = json.dumps({"detail": exc.errors()})
+                elif hasattr(exc, "errors") and callable(getattr(exc, "errors")):
                     status_code = 422
                     response_body = json.dumps({"detail": exc.errors()})
                 elif "JSONDecodeError" in exc_type_name:
@@ -1075,6 +1145,7 @@ __all__ = [
     "ServerSentEvent",
     "format_sse_event",
     "HTTPException",
+    "ResponseValidationError",
     "WebSocketException",
     "WebSocketDisconnect",
     "Depends",

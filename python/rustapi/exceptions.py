@@ -11,6 +11,23 @@ class HTTPException(Exception):
         super().__init__(f"{status_code}: {detail}")
 
 
+class ResponseValidationError(Exception):
+    """Raised when server handler output fails response_model validation (HTTP 500).
+
+    This is distinct from request validation errors (422). When the handler returns
+    data that does not conform to the declared response_model, this error triggers
+    a 500 Internal Server Error — matching FastAPI's behavior.
+    """
+
+    def __init__(self, errors: Any, *, body: Any = None):
+        self._errors = errors
+        self.body = body
+        super().__init__(f"ResponseValidationError: {errors}")
+
+    def errors(self):
+        return self._errors
+
+
 class WebSocketException(Exception):
     """Exception raised for WebSocket error conditions."""
 

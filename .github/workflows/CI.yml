@@ -2,15 +2,45 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
-    branches: [main]
+    branches: [master, main]
 
 jobs:
-  ci-check:
-    name: CI Check
+  test:
+    name: Run Pytest Test Suite
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Quick Check
-        run: echo "CI check passed. Release workflow handles full publishing pipeline."
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install build tools and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install maturin pytest pydantic httpx requests minijinja argon2-cffi PyJWT pyyaml
+
+      - name: Build extension with maturin
+        run: |
+          maturin develop --release
+
+      - name: Run test suite
+        run: |
+          pytest -v

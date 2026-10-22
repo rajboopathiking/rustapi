@@ -1046,7 +1046,7 @@ async fn execute_python_handler(
     Python::with_gil(|py| -> (u16, String, HashMap<String, String>) {
         match py_result {
             Ok(py_obj) => {
-                // Handle explicit Response wrapper.
+                // Handle explicit Response wrapper. Explicit responses bypass response_model entirely.
                 if let Ok(resp_ref) = py_obj.extract::<PyRef<PyResponse>>(py) {
                     let status = resp_ref.status_code;
                     let headers = resp_ref.headers.clone();
@@ -1054,21 +1054,28 @@ async fn execute_python_handler(
                         .or_else(|| headers.get("Content-Type"))
                         .map(|ct| ct.contains("application/json") || ct.contains("text/"))
                         .unwrap_or(false);
-                    let content_obj = if let Some(model) = response_model {
-                        filter_response.bind(py).call1((&resp_ref.content, model))
-                            .map(|b| b.unbind())
-                            .unwrap_or_else(|_| resp_ref.content.clone_ref(py))
-                    } else {
-                        resp_ref.content.clone_ref(py)
-                    };
-                    let body_str = serialize_value(py, &content_obj, serializer, is_raw || raw_string);
+                    let body_str = serialize_value(py, &resp_ref.content, serializer, is_raw || raw_string);
                     return (status, body_str, headers);
                 }
                 // Plain return value.
                 let filtered_obj = if let Some(model) = response_model {
-                    filter_response.bind(py).call1((&py_obj, model))
-                        .map(|b| b.unbind())
-                        .unwrap_or_else(|_| py_obj.clone_ref(py))
+                    match filter_response.bind(py).call1((&py_obj, model)) {
+                        Ok(b) => b.unbind(),
+                        Err(err) => {
+                            let val = err.value_bound(py);
+                            let json_mod = py.import_bound("json").unwrap();
+                            let dict = pyo3::types::PyDict::new_bound(py);
+                            let detail = if let Ok(errors_fn) = val.getattr("errors") {
+                                errors_fn.call0().map(|v| v.into()).unwrap_or_else(|_| val.to_string().into_py(py))
+                            } else {
+                                val.to_string().into_py(py)
+                            };
+                            let _ = dict.set_item("detail", detail);
+                            let dumped = json_mod.call_method1("dumps", (dict,)).and_then(|s| s.extract::<String>())
+                                .unwrap_or_else(|_| json!({"detail": "Response validation error"}).to_string());
+                            return (500, dumped, HashMap::new());
+                        }
+                    }
                 } else {
                     py_obj
                 };
@@ -1104,7 +1111,28 @@ async fn execute_python_handler(
                         }
                     }
 
-                    // Check for Pydantic ValidationError (has .errors() method)
+                    // Get exception type name early for ResponseValidationError check
+                    let type_name = val.get_type().name().map(|n| n.to_string()).unwrap_or_default();
+
+                    // Check for ResponseValidationError (server output failed response_model) → 500
+                    if type_name.contains("ResponseValidationError") {
+                        if let Ok(errors_fn) = val.getattr("errors") {
+                            if let Ok(err_list) = errors_fn.call0() {
+                                if let Ok(json_mod) = py.import_bound("json") {
+                                    let dict = pyo3::types::PyDict::new_bound(py);
+                                    let _ = dict.set_item("detail", err_list);
+                                    if let Ok(dumped) = json_mod.call_method1("dumps", (dict,)) {
+                                        if let Ok(s) = dumped.extract::<String>() {
+                                            return Some((500, s));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        return Some((500, json!({"detail": "Internal Server Error"}).to_string()));
+                    }
+
+                    // Check for Pydantic ValidationError (has .errors() method) → 422
                     if let Ok(errors_fn) = val.getattr("errors") {
                         if let Ok(err_list) = errors_fn.call0() {
                             if let Ok(json_mod) = py.import_bound("json") {
@@ -1120,7 +1148,6 @@ async fn execute_python_handler(
                     }
 
                     // Check for JSONDecodeError
-                    let type_name = val.get_type().name().map(|n| n.to_string()).unwrap_or_default();
                     if type_name.contains("JSONDecodeError") {
                         let err_json = json!({
                             "detail": [
@@ -1308,6 +1335,8 @@ _adapter_cache = {}
 def _filter_response(val, response_model):
     if response_model is None or val is None:
         return val
+    if hasattr(val, 'status_code') and hasattr(val, 'headers') and not isinstance(val, (dict, list)):
+        return val
     try:
         from pydantic import TypeAdapter
         is_list = isinstance(val, list) and hasattr(response_model, "model_validate")
@@ -1320,12 +1349,22 @@ def _filter_response(val, response_model):
                 adapter = TypeAdapter(response_model)
             _adapter_cache[cache_key] = adapter
         validated = adapter.validate_python(val, from_attributes=True)
-        return adapter.dump_python(validated, mode="json")
-    except Exception:
+        return adapter.dump_python(validated, mode="json", by_alias=True)
+    except Exception as exc:
+        from rustapi.exceptions import ResponseValidationError
+        try:
+            from pydantic import ValidationError as PydanticValidationError
+            if isinstance(exc, PydanticValidationError):
+                raise ResponseValidationError(errors=exc.errors(), body=val) from exc
+        except ImportError:
+            pass
         if hasattr(response_model, "model_validate"):
-            if isinstance(val, list):
-                return [response_model.model_validate(i, from_attributes=True).model_dump(mode="json") for i in val]
-            return response_model.model_validate(val, from_attributes=True).model_dump(mode="json")
+            try:
+                if isinstance(val, list):
+                    return [response_model.model_validate(i, from_attributes=True).model_dump(mode="json", by_alias=True) for i in val]
+                return response_model.model_validate(val, from_attributes=True).model_dump(mode="json", by_alias=True)
+            except Exception as e2:
+                raise ResponseValidationError(errors=getattr(e2, 'errors', lambda: str(e2))(), body=val) from e2
         return val
 
 def _schema_from_signature(func):
@@ -2715,7 +2754,7 @@ async fn handle_route(
         r_headers.insert("Content-Type".to_string(), "application/json".to_string());
     }
 
-    // Dependency teardown generators.
+    // Dependency teardown generators (fire-and-forget, runs after response is dispatched).
     let teardown_coro = Python::with_gil(|py| -> Option<PyObject> {
         let list_bound = teardown_list_py.bind(py).downcast::<pyo3::types::PyList>().ok()?;
         if list_bound.is_empty() {
@@ -2727,14 +2766,16 @@ async fn handle_route(
     });
 
     if let Some(coro) = teardown_coro {
-        let (tx, rx) = oneshot::channel();
         let sc = schedule_coro.clone();
-        Python::with_gil(|py| {
-            if let Ok(cb) = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) }) {
-                let _ = sc.bind(py).call1((coro, cb));
-            }
+        tokio::spawn(async move {
+            let (tx, rx) = oneshot::channel();
+            Python::with_gil(|py| {
+                if let Ok(cb) = Py::new(py, CoroCallback { tx: StdMutex::new(Some(tx)) }) {
+                    let _ = sc.bind(py).call1((coro, cb));
+                }
+            });
+            let _ = rx.await;
         });
-        let _ = rx.await;
     }
 
     // Background tasks.

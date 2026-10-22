@@ -32,6 +32,7 @@ if __name__ == "__main__":
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        start_new_session=(sys.platform != "win32"),
     )
 
     try:
@@ -56,9 +57,14 @@ if __name__ == "__main__":
             if sys.platform == "win32":
                 proc.terminate()
             else:
-                proc.send_signal(signal.SIGINT)
+                os.killpg(proc.pid, signal.SIGINT)
             stdout, stderr = proc.communicate(timeout=3)
         except Exception:
+            try:
+                if sys.platform != "win32":
+                    os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                pass
             proc.kill()
             stdout, stderr = proc.communicate()
 
