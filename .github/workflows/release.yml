@@ -72,11 +72,47 @@ jobs:
           path: dist
 
   # ---------------------------------------------------
-  # STAGE 3: Publish all collected wheels & sdist to PyPI
+  # STAGE 3: Test Gate (Require passing tests before publish)
+  # ---------------------------------------------------
+  test:
+    name: Test Gate Verification
+    needs: [build-wheels]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download Linux x86_64 wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-ubuntu-latest-x86_64
+          path: dist
+
+      - name: Install test dependencies and built wheel
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-asyncio pydantic httpx requests minijinja argon2-cffi PyJWT pyyaml numpy pillow
+          pip install dist/*.whl --force-reinstall
+
+      - name: Verify installed version
+        run: |
+          python -c "import rustapi; print('RustAPI version:', rustapi.__version__); assert rustapi.__version__ == '1.9.0b4'"
+
+      - name: Run full test suite
+        run: |
+          pytest -v
+
+  # ---------------------------------------------------
+  # STAGE 4: Publish all collected wheels & sdist to PyPI
   # ---------------------------------------------------
   publish:
     name: Publish to PyPI
-    needs: [build-sdist, build-wheels]
+    needs: [test, build-sdist, build-wheels]
     runs-on: ubuntu-latest
     environment:
       name: pypi

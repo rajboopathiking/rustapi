@@ -207,14 +207,7 @@ def test_user_router_tags_in_openapi_spec():
 
     app.include_router(crud_router, prefix="/photos", tags=["photos"])
 
-    port = 8999
-    thread = threading.Thread(target=lambda: app.run(host="127.0.0.1", port=port), daemon=True)
-    thread.start()
-    time.sleep(0.3)
-
-    resp = requests.get(f"http://127.0.0.1:{port}/openapi.json")
-    assert resp.status_code == 200
-    spec = resp.json()
+    spec = app.openapi()
 
     assert "/photos/" in spec["paths"]
     assert "/photos/upload" in spec["paths"]

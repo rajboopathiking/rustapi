@@ -153,3 +153,78 @@ async def test_yield_dependency_teardown_on_subsequent_dependency_error():
     assert "enter_dep1" in events
     assert "dep2_fails" in events
     assert "exit_dep1" in events
+
+
+@pytest.mark.asyncio
+async def test_function_vs_request_scope_cleanup_timing():
+    """Verify function-scoped dependencies clean up before response transmission,
+    while request-scoped dependencies remain available until response completion."""
+    app = FastAPI()
+    events = []
+
+    def func_dep():
+        events.append("enter_func")
+        try:
+            yield "func_val"
+        finally:
+            events.append("exit_func")
+
+    def req_dep():
+        events.append("enter_req")
+        try:
+            yield "req_val"
+        finally:
+            events.append("exit_req")
+
+    @app.get("/scopes-test")
+    async def scopes_route(
+        f: str = Depends(func_dep, scope="function"),
+        r: str = Depends(req_dep, scope="request"),
+    ):
+        events.append("handler_running")
+        return {"f": f, "r": r}
+
+    # Custom receive/send to inspect events during response transmission
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/scopes-test")
+        assert resp.status_code == 200
+        assert resp.json() == {"f": "func_val", "r": "req_val"}
+
+    # Both enter first, then handler, then function exits before response completes,
+    # then request-scoped exits after response transmission completes!
+    assert events == [
+        "enter_func",
+        "enter_req",
+        "handler_running",
+        "exit_func",
+        "exit_req",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delayed_response_sending_request_scope():
+    """Verify request-scoped dependency remains active during response transmission."""
+    app = FastAPI()
+    events = []
+
+    async def db_session():
+        events.append("db_opened")
+        try:
+            yield "active_session"
+        finally:
+            events.append("db_closed")
+
+    @app.get("/delayed-response")
+    async def delayed_route(db: str = Depends(db_session, scope="request")):
+        events.append("handler_executed")
+        return {"db": db}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/delayed-response")
+        assert resp.status_code == 200
+        assert resp.json() == {"db": "active_session"}
+
+    assert events == ["db_opened", "handler_executed", "db_closed"]
+

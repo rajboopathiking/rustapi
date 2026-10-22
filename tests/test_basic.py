@@ -102,11 +102,15 @@ def summary_prompt(topic: str) -> str:
 @pytest.fixture(scope="session", autouse=True)
 def server_lifecycle():
     logger.info("🚀 Launching embedded Rust server instance for pytest session...")
-    def run_server():
-        app.run(host=HOST, port=PORT, reload=False)
-
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
+    import subprocess, signal, sys, os
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from tests.test_basic import app, HOST, PORT; app.run(host=HOST, port=PORT, reload=False)",
+        ],
+        start_new_session=(sys.platform != "win32"),
+    )
 
     # Wait until the server is actively listening
     deadline = time.time() + 5.0
@@ -118,10 +122,20 @@ def server_lifecycle():
         except requests.exceptions.ConnectionError:
             time.sleep(0.1)
     else:
+        proc.kill()
         raise RuntimeError("Test server failed to start within the deadline.")
 
     yield
     logger.info("🛑 Shutting down test server cleanly.")
+    try:
+        if sys.platform != "win32":
+            os.killpg(proc.pid, signal.SIGINT)
+        else:
+            proc.terminate()
+        proc.wait(timeout=3)
+    except Exception:
+        proc.kill()
+        proc.wait()
 
 # ---------------------------------------------------------
 # MCP TEST HELPER

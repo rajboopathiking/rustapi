@@ -2,6 +2,7 @@ import io
 import sqlite3
 import threading
 import time
+import pytest
 import requests
 import jwt
 import httpx
@@ -83,32 +84,59 @@ async def analyze_image(req: Request, db=Depends(get_db)):
 
 def test_python_ecosystem_compatibility():
     port = 8996
-    thread = threading.Thread(target=lambda: app.run(host="127.0.0.1", port=port), daemon=True)
-    thread.start()
-    time.sleep(0.4)
+    import subprocess, signal, sys, os
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            f"from tests.test_python_ecosystem_compatibility import app; app.run(host='127.0.0.1', port={port}, reload=False)",
+        ],
+        start_new_session=(sys.platform != "win32"),
+    )
 
-    # Generate sample 100x100 grayscale image in memory using PIL
-    img = Image.new("L", (100, 100), color=128)
-    img_byte_arr = io.BytesIO()
-    img.save(img_byte_arr, format="PNG")
-    png_bytes = img_byte_arr.getvalue()
+    try:
+        connected = False
+        for _ in range(30):
+            try:
+                requests.get(f"http://127.0.0.1:{port}/openapi.json", timeout=0.5)
+                connected = True
+                break
+            except Exception:
+                time.sleep(0.1)
+        assert connected, "Server failed to start"
 
-    # Call endpoint using HTTPX
-    with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
-        files = {"photo": ("test_image.png", png_bytes, "image/png")}
-        data = {"project_name": "SkinAnalysis", "threshold": "0.75"}
+        # Generate sample 100x100 grayscale image in memory using PIL
+        img = Image.new("L", (100, 100), color=128)
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format="PNG")
+        png_bytes = img_byte_arr.getvalue()
 
-        response = client.post("/analyze-image", data=data, files=files)
-        assert response.status_code == 200
+        # Call endpoint using HTTPX
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
+            files = {"photo": ("test_image.png", png_bytes, "image/png")}
+            data = {"project_name": "SkinAnalysis", "threshold": "0.75"}
 
-        res_json = response.json()
-        assert res_json["status"] == "success"
-        assert res_json["user"] == "alice"
-        assert res_json["project"] == "SkinAnalysis"
-        assert res_json["mean_brightness"] == 128.0
+            response = client.post("/analyze-image", data=data, files=files)
+            assert response.status_code == 200
 
-        # Decode JWT token to verify PyJWT compatibility
-        decoded = jwt.decode(res_json["jwt_token"], "secret_key_999", algorithms=["HS256"])
-        assert decoded["sub"] == "alice"
-        assert decoded["project"] == "SkinAnalysis"
-        assert decoded["brightness"] == 128.0
+            res_json = response.json()
+            assert res_json["status"] == "success"
+            assert res_json["user"] == "alice"
+            assert res_json["project"] == "SkinAnalysis"
+            assert res_json["mean_brightness"] == 128.0
+
+            # Decode JWT token to verify PyJWT compatibility
+            decoded = jwt.decode(res_json["jwt_token"], "secret_key_999", algorithms=["HS256"])
+            assert decoded["sub"] == "alice"
+            assert decoded["project"] == "SkinAnalysis"
+            assert decoded["brightness"] == 128.0
+    finally:
+        try:
+            if sys.platform != "win32":
+                os.killpg(proc.pid, signal.SIGINT)
+            else:
+                proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            proc.kill()
+            proc.wait()

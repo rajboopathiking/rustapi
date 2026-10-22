@@ -3,6 +3,7 @@ import requests
 import threading
 import time
 import asyncio
+from httpx import ASGITransport, AsyncClient
 from rustapi import FastAPI, APIRouter, Request, Depends, HTTPException, status
 from rustapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer
 from rustapi.uploads import UploadFile

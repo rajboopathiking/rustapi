@@ -57,6 +57,7 @@ struct DependencyMeta {
     is_generator: bool,
     use_cache: bool,
     id: isize,
+    scope: String,
 }
 
 impl Clone for DependencyMeta {
@@ -68,6 +69,7 @@ impl Clone for DependencyMeta {
             is_generator: self.is_generator,
             use_cache: self.use_cache,
             id: self.id,
+            scope: self.scope.clone(),
         })
     }
 }
@@ -991,7 +993,15 @@ fn build_streaming_response(
                     if !list_bound.is_empty() {
                         if let Ok(resolver) = py.import_bound("rustapi.resolver") {
                             if let Ok(td_fn) = resolver.getattr("teardown_dependencies") {
-                                let _ = td_fn.call1((list_bound,));
+                                if let Ok(coro) = td_fn.call1((list_bound,)) {
+                                    if let Ok(engine_mod) = py.import_bound("rustapi._rustapi") {
+                                        if let Ok(sched) = engine_mod.getattr("_schedule_coro") {
+                                            if let Ok(noop) = py.eval_bound("lambda *args: None", None, None) {
+                                                let _ = sched.call1((coro, noop));
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1480,7 +1490,7 @@ def _schema_from_signature(func):
         }
     }
 
-    #[pyo3(signature = (method, path, query_string, headers, body))]
+    #[pyo3(signature = (method, path, query_string, headers, body, teardown_list = None))]
     fn dispatch_request(
         &self,
         py: Python<'_>,
@@ -1489,6 +1499,7 @@ def _schema_from_signature(func):
         query_string: String,
         headers: HashMap<String, String>,
         body: String,
+        teardown_list: Option<PyObject>,
     ) -> PyResult<PyObject> {
         let asyncio = py.import_bound("asyncio")?;
         let loop_obj = asyncio.call_method0("get_running_loop").or_else(|_| asyncio.call_method0("get_event_loop"))?;
@@ -1498,13 +1509,21 @@ def _schema_from_signature(func):
         let fut_py_cb = fut_py.clone_ref(py);
         let loop_py_cb = loop_py.clone_ref(py);
 
+        let py_sched = py.eval_bound(
+            "lambda loop: (lambda coro, cb: loop.call_soon_threadsafe(lambda: loop.create_task(coro).add_done_callback(lambda t: cb(t.result() if not t.exception() else None, t.exception()))))",
+            None,
+            None,
+        )?;
+        let sched = py_sched.call1((&loop_obj,))?;
+        let schedule_coro = Arc::new(sched.unbind());
+
         let routes = self.routes.clone();
         let native_routes = self.native_routes.clone();
         let serializer = Arc::new(self.serializer.clone_ref(py));
         let filter_response = Arc::new(self.filter_response_fn.clone_ref(py));
-        let schedule_coro = Arc::new(self.schedule_coro_fn.clone_ref(py));
         let gil_sem = Arc::new(Semaphore::new(100));
         let dependency_overrides = Arc::new(self.dependency_overrides.clone_ref(py));
+        let ext_td = teardown_list;
 
         get_db_rt().spawn(async move {
             let matched_native = {
@@ -1544,6 +1563,8 @@ def _schema_from_signature(func):
                     idx, path_params, method, path, body, headers, cookies_map, query_params,
                     HashMap::new(), HashMap::new(), &routes, &serializer, &filter_response,
                     &schedule_coro, &gil_sem, &dependency_overrides,
+                    ext_td.as_ref(),
+                    true,
                 ).await;
 
                 match resp_res {
@@ -2237,6 +2258,8 @@ async fn handle(
                     headers_map, cookies_map, query_params,
                     form_map, files_map,
                     &routes, &serializer, &filter_response, &schedule_coro, &gil_sem, &dependency_overrides,
+                    None,
+                    false,
                 ).await;
                 match result {
                     Ok(resp)      => return Ok(resp),
@@ -2398,6 +2421,7 @@ async fn handle_mcp(
 async fn run_dependency_teardown(
     teardown_list_py: &PyObject,
     schedule_coro: &Arc<PyObject>,
+    target_scope: Option<&str>,
 ) {
     let teardown_coro = Python::with_gil(|py| -> Option<PyObject> {
         let list_bound = teardown_list_py.bind(py).downcast::<pyo3::types::PyList>().ok()?;
@@ -2406,7 +2430,8 @@ async fn run_dependency_teardown(
         }
         let resolver = py.import_bound("rustapi.resolver").ok()?;
         let teardown_fn = resolver.getattr("teardown_dependencies").ok()?;
-        teardown_fn.call1((list_bound,)).map(|c| c.unbind()).ok()
+        let scope_py = target_scope.map(|s| s.into_py(py)).unwrap_or_else(|| py.None());
+        teardown_fn.call1((list_bound, scope_py)).map(|c| c.unbind()).ok()
     });
 
     if let Some(coro) = teardown_coro {
@@ -2418,6 +2443,33 @@ async fn run_dependency_teardown(
             }
         });
         let _ = rx.await;
+    }
+}
+
+fn attach_request_teardown_to_body(
+    body_bytes: Vec<u8>,
+    teardown_list_py: Option<PyObject>,
+    schedule_coro: Arc<PyObject>,
+) -> Body {
+    if let Some(td_list) = teardown_list_py {
+        let has_items = Python::with_gil(|py| {
+            td_list.bind(py).downcast::<pyo3::types::PyList>().map(|l| !l.is_empty()).unwrap_or(false)
+        });
+        if !has_items {
+            return Body::from(body_bytes);
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<hyper::body::Bytes, Infallible>>(1);
+        tokio::spawn(async move {
+            let bytes = hyper::body::Bytes::from(body_bytes);
+            let _ = tx.send(Ok(bytes)).await;
+            run_dependency_teardown(&td_list, &schedule_coro, Some("request")).await;
+        });
+        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
+        Body::wrap_stream(stream)
+    } else {
+        Body::from(body_bytes)
     }
 }
 
@@ -2440,6 +2492,8 @@ async fn handle_route(
     schedule_coro: &Arc<PyObject>,
     gil_sem: &Arc<Semaphore>,
     dependency_overrides: &Arc<PyObject>,
+    external_teardown_list: Option<&PyObject>,
+    is_asgi: bool,
 ) -> Result<HyperResponse<Body>, String> {
     // Extract route metadata.
     let (handler, is_async, pydantic_model, pydantic_param_name, request_param_name,
@@ -2471,7 +2525,9 @@ async fn handle_route(
     let mut dependency_error_response: Option<HyperResponse<Body>> = None;
     let mut resolved_args   = HashMap::<String, PyObject>::new();
     let dep_cache_obj       = Python::with_gil(|py| pyo3::types::PyDict::new_bound(py).into_any().unbind());
-    let teardown_list_py    = Python::with_gil(|py| pyo3::types::PyList::empty_bound(py).into_any().unbind());
+    let teardown_list_py    = external_teardown_list
+        .map(|o| Python::with_gil(|py| o.clone_ref(py)))
+        .unwrap_or_else(|| Python::with_gil(|py| pyo3::types::PyList::empty_bound(py).into_any().unbind()));
 
     for dep in deps {
         let dep_func = Python::with_gil(|py| -> PyObject {
@@ -2489,7 +2545,7 @@ async fn handle_route(
             let resolver = py.import_bound("rustapi.resolver")?;
             let solver = resolver.getattr("solve_dependency")?;
             let ov_bound = dependency_overrides.bind(py);
-            solver.call1((dep_func, &req_obj, ov_bound, &dep_cache_obj, &teardown_list_py)).map(|c| c.unbind())
+            solver.call1((dep_func, &req_obj, ov_bound, &dep_cache_obj, &teardown_list_py, dep.scope.clone())).map(|c| c.unbind())
         });
 
         match solve_coro {
@@ -2584,7 +2640,7 @@ async fn handle_route(
     }
 
     if let Some(err_resp) = dependency_error_response {
-        run_dependency_teardown(&teardown_list_py, schedule_coro).await;
+        run_dependency_teardown(&teardown_list_py, schedule_coro, None).await;
         return Ok(err_resp);
     }
 
@@ -2839,8 +2895,12 @@ async fn handle_route(
         r_headers.insert("Content-Type".to_string(), "application/json".to_string());
     }
 
-    // Dependency teardown generators: clean up before completing response
-    run_dependency_teardown(&teardown_list_py, schedule_coro).await;
+    // Dependency teardown generators
+    if r_status >= 400 {
+        run_dependency_teardown(&teardown_list_py, schedule_coro, None).await;
+    } else {
+        run_dependency_teardown(&teardown_list_py, schedule_coro, Some("function")).await;
+    }
 
     // Background tasks.
     if let Some(bg_obj) = bg_tasks_obj {
@@ -2883,7 +2943,12 @@ async fn handle_route(
 
     let mut builder = HyperResponse::builder().status(r_status);
     for (k, v) in r_headers { builder = builder.header(&k, &v); }
-    Ok(builder.body(Body::from(r_body)).unwrap())
+    let body = if is_asgi {
+        Body::from(r_body)
+    } else {
+        attach_request_teardown_to_body(r_body.into_bytes(), Some(teardown_list_py), schedule_coro.clone())
+    };
+    Ok(builder.body(body).unwrap())
 }
 
 // ---------------------------------------------------------------------------
@@ -3041,10 +3106,14 @@ impl RouteDecorator {
                                 let is_dep_async = inspect.getattr("iscoroutinefunction")?.call1((&dep_func,))?.extract().unwrap_or(false);
                                 let is_dep_gen   = inspect.getattr("isgeneratorfunction")?.call1((&dep_func,))?.extract().unwrap_or(false);
                                 let dep_id       = dep_func.as_ptr() as isize;
+                                let dep_scope: String = d_val.getattr("scope")
+                                    .and_then(|s| s.extract::<String>())
+                                    .unwrap_or_else(|_| "function".to_string());
                                 dependencies.push(DependencyMeta {
                                     name: param_name.clone(), func: dep_func.into(),
                                     _is_async: is_dep_async, is_generator: is_dep_gen,
                                     use_cache: true, id: dep_id,
+                                    scope: dep_scope,
                                 });
                             }
                             continue;

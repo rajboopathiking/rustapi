@@ -47,14 +47,18 @@ app.add_native_route("/tier3/native-html", '<h1>Native Rust HTML</h1>', content_
 
 @pytest.fixture(scope="module", autouse=True)
 def run_3tier_server():
-    server_thread = threading.Thread(
-        target=lambda: app.run(host=HOST, port=PORT),
-        daemon=True,
+    import subprocess, signal, sys, os
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from tests.test_3tier_architecture import app, HOST, PORT; app.run(host=HOST, port=PORT, reload=False)",
+        ],
+        start_new_session=(sys.platform != "win32"),
     )
-    server_thread.start()
 
     connected = False
-    for _ in range(20):
+    for _ in range(30):
         try:
             r = requests.get(f"{BASE}/tier3/native-json", timeout=1)
             if r.status_code == 200:
@@ -62,7 +66,20 @@ def run_3tier_server():
                 break
         except Exception:
             time.sleep(0.1)
-    assert connected, "3-Tier server failed to start"
+    if not connected:
+        proc.kill()
+        raise RuntimeError("3-Tier server failed to start")
+
+    yield
+    try:
+        if sys.platform != "win32":
+            os.killpg(proc.pid, signal.SIGINT)
+        else:
+            proc.terminate()
+        proc.wait(timeout=3)
+    except Exception:
+        proc.kill()
+        proc.wait()
 
 
 def test_tier1_pure_python():

@@ -1015,51 +1015,59 @@ class FastAPI(Engine):
 
         body_str = body_bytes.decode("utf-8", errors="replace")
 
+        teardown_list = []
         try:
-            status_code, response_body, resp_headers = await self.dispatch_request(
-                method, path, query_string, headers, body_str
-            )
-        except Exception as exc:
-            import logging
-            logging.getLogger("rustapi").error(f"Error handling ASGI request [{method} {path}]: {exc}", exc_info=True)
-            handler = self.exception_handlers.get(type(exc)) or self.exception_handlers.get(getattr(exc, "status_code", None))
-            if handler:
-                req = PyRequest(method=method, path=path, path_params={}, query_params={}, headers=headers, cookies={}, form={}, files={}, body=body_str)
-                resp = await handler(req, exc) if inspect.iscoroutinefunction(handler) else handler(req, exc)
-                status_code = getattr(resp, "status_code", 500)
-                response_body = getattr(resp, "content", str(exc))
-                resp_headers = getattr(resp, "headers", {"content-type": "application/json"})
-            else:
-                exc_type_name = type(exc).__name__
-                if exc_type_name == "ResponseValidationError":
-                    status_code = 500
-                    response_body = json.dumps({"detail": exc.errors()})
-                elif hasattr(exc, "errors") and callable(getattr(exc, "errors")):
-                    status_code = 422
-                    response_body = json.dumps({"detail": exc.errors()})
-                elif "JSONDecodeError" in exc_type_name:
-                    status_code = 422
-                    response_body = json.dumps({"detail": [{"loc": ["body"], "msg": "JSON decode error", "type": "json_invalid"}]})
-                elif hasattr(exc, "status_code"):
-                    status_code = getattr(exc, "status_code", 500)
-                    detail = getattr(exc, "detail", str(exc))
-                    response_body = json.dumps({"detail": detail})
+            try:
+                status_code, response_body, resp_headers = await self.dispatch_request(
+                    method, path, query_string, headers, body_str, teardown_list
+                )
+            except Exception as exc:
+                import logging
+                logging.getLogger("rustapi").error(f"Error handling ASGI request [{method} {path}]: {exc}", exc_info=True)
+                handler = self.exception_handlers.get(type(exc)) or self.exception_handlers.get(getattr(exc, "status_code", None))
+                if handler:
+                    req = PyRequest(method=method, path=path, path_params={}, query_params={}, headers=headers, cookies={}, form={}, files={}, body=body_str)
+                    resp = await handler(req, exc) if inspect.iscoroutinefunction(handler) else handler(req, exc)
+                    status_code = getattr(resp, "status_code", 500)
+                    response_body = getattr(resp, "content", str(exc))
+                    resp_headers = getattr(resp, "headers", {"content-type": "application/json"})
                 else:
-                    status_code = getattr(exc, "status_code", 500)
-                    detail = getattr(exc, "detail", str(exc))
-                    response_body = json.dumps({"detail": detail})
-                resp_headers = {"content-type": "application/json"}
+                    exc_type_name = type(exc).__name__
+                    if exc_type_name == "ResponseValidationError":
+                        status_code = 500
+                        response_body = json.dumps({"detail": exc.errors()})
+                    elif hasattr(exc, "errors") and callable(getattr(exc, "errors")):
+                        status_code = 422
+                        response_body = json.dumps({"detail": exc.errors()})
+                    elif "JSONDecodeError" in exc_type_name:
+                        status_code = 422
+                        response_body = json.dumps({"detail": [{"loc": ["body"], "msg": "JSON decode error", "type": "json_invalid"}]})
+                    elif hasattr(exc, "status_code"):
+                        status_code = getattr(exc, "status_code", 500)
+                        detail = getattr(exc, "detail", str(exc))
+                        response_body = json.dumps({"detail": detail})
+                    else:
+                        status_code = getattr(exc, "status_code", 500)
+                        detail = getattr(exc, "detail", str(exc))
+                        response_body = json.dumps({"detail": detail})
+                    resp_headers = {"content-type": "application/json"}
 
-        encoded_headers = [(k.encode("latin1"), v.encode("latin1")) for k, v in resp_headers.items()]
-        await send({
-            "type": "http.response.start",
-            "status": status_code,
-            "headers": encoded_headers,
-        })
-        await send({
-            "type": "http.response.body",
-            "body": response_body.encode("utf-8") if isinstance(response_body, str) else response_body,
-        })
+            encoded_headers = [(k.encode("latin1"), v.encode("latin1")) for k, v in resp_headers.items()]
+            await send({
+                "type": "http.response.start",
+                "status": status_code,
+                "headers": encoded_headers,
+            })
+            await send({
+                "type": "http.response.body",
+                "body": response_body.encode("utf-8") if isinstance(response_body, str) else response_body,
+            })
+        finally:
+            if teardown_list:
+                from .resolver import teardown_dependencies
+                await teardown_dependencies(teardown_list, target_scope="request")
+                if teardown_list:
+                    await teardown_dependencies(teardown_list, target_scope=None)
 
     def exception_handler(self, exc_class_or_status_code: Any):
         """Register an exception handler decorator for an exception class or status code."""
@@ -1149,7 +1157,7 @@ class RedirectResponse(Response):
         return Response.__new__(cls, content="", status_code=status_code, headers=h)
 
 
-__version__ = "1.9.0b3"
+__version__ = "1.9.0b4"
 __all__ = [
     "Engine",
     "FastAPI",

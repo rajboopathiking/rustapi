@@ -76,71 +76,67 @@ def get_openid_route(auth=Depends(openid_scheme)):
     return {"scheme": "openid"}
 
 
-def test_swagger_ui_and_openapi_security_top_lock_button():
-    port = 9015
-    t = threading.Thread(target=lambda: app.run(host="127.0.0.1", port=port), daemon=True)
-    t.start()
-    time.sleep(1.5)
+@pytest.mark.asyncio
+async def test_swagger_ui_and_openapi_security_top_lock_button():
+    import httpx
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # 1. Test Swagger UI (/docs) returns HTML with StandaloneLayout & Authorize lock button presets
+        res_docs = await client.get("/docs")
+        assert res_docs.status_code == 200
+        assert "SwaggerUIBundle" in res_docs.text
+        assert "StandaloneLayout" in res_docs.text or "SwaggerUIStandalonePreset" in res_docs.text
 
-    base_url = f"http://127.0.0.1:{port}"
+        # 2. Test /openapi.json contains all securitySchemes for top Authorize lock button
+        res_spec = await client.get("/openapi.json")
+        assert res_spec.status_code == 200
+        spec = res_spec.json()
 
-    # 1. Test Swagger UI (/docs) returns HTML with StandaloneLayout & Authorize lock button presets
-    res_docs = requests.get(f"{base_url}/docs")
-    assert res_docs.status_code == 200
-    assert "SwaggerUIBundle" in res_docs.text
-    assert "StandaloneLayout" in res_docs.text or "SwaggerUIStandalonePreset" in res_docs.text
+        assert "components" in spec
+        assert "securitySchemes" in spec["components"]
+        schemes = spec["components"]["securitySchemes"]
 
-    # 2. Test /openapi.json contains all securitySchemes for top Authorize lock button
-    res_spec = requests.get(f"{base_url}/openapi.json")
-    assert res_spec.status_code == 200
-    spec = res_spec.json()
+        assert "CustomBearer" in schemes
+        assert schemes["CustomBearer"]["type"] == "http"
+        assert schemes["CustomBearer"]["scheme"] == "bearer"
 
-    assert "components" in spec
-    assert "securitySchemes" in spec["components"]
-    schemes = spec["components"]["securitySchemes"]
+        assert "CustomOAuth2" in schemes
+        assert schemes["CustomOAuth2"]["type"] == "oauth2"
+        assert "password" in schemes["CustomOAuth2"]["flows"]
 
-    assert "CustomBearer" in schemes
-    assert schemes["CustomBearer"]["type"] == "http"
-    assert schemes["CustomBearer"]["scheme"] == "bearer"
+        assert "CustomOAuth2Code" in schemes
+        assert schemes["CustomOAuth2Code"]["type"] == "oauth2"
+        assert "authorizationCode" in schemes["CustomOAuth2Code"]["flows"]
 
-    assert "CustomOAuth2" in schemes
-    assert schemes["CustomOAuth2"]["type"] == "oauth2"
-    assert "password" in schemes["CustomOAuth2"]["flows"]
+        assert "CustomHeaderKey" in schemes
+        assert schemes["CustomHeaderKey"]["type"] == "apiKey"
+        assert schemes["CustomHeaderKey"]["in"] == "header"
 
-    assert "CustomOAuth2Code" in schemes
-    assert schemes["CustomOAuth2Code"]["type"] == "oauth2"
-    assert "authorizationCode" in schemes["CustomOAuth2Code"]["flows"]
+        assert "CustomQueryKey" in schemes
+        assert schemes["CustomQueryKey"]["type"] == "apiKey"
+        assert schemes["CustomQueryKey"]["in"] == "query"
 
-    assert "CustomHeaderKey" in schemes
-    assert schemes["CustomHeaderKey"]["type"] == "apiKey"
-    assert schemes["CustomHeaderKey"]["in"] == "header"
+        assert "CustomCookieKey" in schemes
+        assert schemes["CustomCookieKey"]["type"] == "apiKey"
+        assert schemes["CustomCookieKey"]["in"] == "cookie"
 
-    assert "CustomQueryKey" in schemes
-    assert schemes["CustomQueryKey"]["type"] == "apiKey"
-    assert schemes["CustomQueryKey"]["in"] == "query"
+        assert "CustomBasic" in schemes
+        assert schemes["CustomBasic"]["type"] == "http"
+        assert schemes["CustomBasic"]["scheme"] == "basic"
 
-    assert "CustomCookieKey" in schemes
-    assert schemes["CustomCookieKey"]["type"] == "apiKey"
-    assert schemes["CustomCookieKey"]["in"] == "cookie"
+        assert "CustomDigest" in schemes
+        assert schemes["CustomDigest"]["type"] == "http"
+        assert schemes["CustomDigest"]["scheme"] == "digest"
 
-    assert "CustomBasic" in schemes
-    assert schemes["CustomBasic"]["type"] == "http"
-    assert schemes["CustomBasic"]["scheme"] == "basic"
+        assert "CustomOpenID" in schemes
+        assert schemes["CustomOpenID"]["type"] == "openIdConnect"
 
-    assert "CustomDigest" in schemes
-    assert schemes["CustomDigest"]["type"] == "http"
-    assert schemes["CustomDigest"]["scheme"] == "digest"
+        # 3. Test individual path operations contain 'security' requirements
+        paths = spec["paths"]
+        assert "security" in paths["/sec/bearer"]["get"]
+        assert paths["/sec/bearer"]["get"]["security"] == [{"CustomBearer": []}]
 
-    assert "CustomOpenID" in schemes
-    assert schemes["CustomOpenID"]["type"] == "openIdConnect"
-
-    # 3. Test individual path operations contain 'security' requirements
-    paths = spec["paths"]
-    assert "security" in paths["/sec/bearer"]["get"]
-    assert paths["/sec/bearer"]["get"]["security"] == [{"CustomBearer": []}]
-
-    assert "security" in paths["/sec/header-key"]["get"]
-    assert paths["/sec/header-key"]["get"]["security"] == [{"CustomHeaderKey": []}]
+        assert "security" in paths["/sec/header-key"]["get"]
+        assert paths["/sec/header-key"]["get"]["security"] == [{"CustomHeaderKey": []}]
 
 
 def test_python_get_openapi_security_generation():

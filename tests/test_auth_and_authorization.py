@@ -70,53 +70,49 @@ def read_api_key(key: str = Depends(api_key_scheme)):
     return {"status": "valid key"}
 
 
-def test_authentication_and_authorization_full_suite():
-    port = 9005
-    t = threading.Thread(target=lambda: app.run(host="127.0.0.1", port=port), daemon=True)
-    t.start()
-    time.sleep(1.5)
+@pytest.mark.asyncio
+async def test_authentication_and_authorization_full_suite():
+    import httpx
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # 1. OpenAPI securitySchemes verification
+        res_openapi = await client.get("/openapi.json")
+        assert res_openapi.status_code == 200
+        doc = res_openapi.json()
+        assert "components" in doc
+        assert "securitySchemes" in doc["components"]
+        assert "OAuth2PasswordBearer" in doc["components"]["securitySchemes"] or "HTTPBearer" in doc["components"]["securitySchemes"]
 
-    base_url = f"http://127.0.0.1:{port}"
+        # 2. Authentication failure: Missing token -> 401 Unauthorized (NOT 500)
+        res_no_token = await client.get("/users/me")
+        assert res_no_token.status_code == 401
+        assert "Authorization header missing" in res_no_token.json()["detail"] or "Not authenticated" in res_no_token.json()["detail"]
 
-    # 1. OpenAPI securitySchemes verification
-    res_openapi = requests.get(f"{base_url}/openapi.json")
-    assert res_openapi.status_code == 200
-    doc = res_openapi.json()
-    assert "components" in doc
-    assert "securitySchemes" in doc["components"]
-    assert "OAuth2PasswordBearer" in doc["components"]["securitySchemes"] or "HTTPBearer" in doc["components"]["securitySchemes"]
+        # 3. Authentication failure: Invalid token -> 401 Unauthorized
+        res_bad_token = await client.get("/users/me", headers={"Authorization": "Bearer invalid_garbage_token"})
+        assert res_bad_token.status_code == 401
 
-    # 2. Authentication failure: Missing token -> 401 Unauthorized (NOT 500)
-    res_no_token = requests.get(f"{base_url}/users/me")
-    assert res_no_token.status_code == 401
-    assert "Authorization header missing" in res_no_token.json()["detail"] or "Not authenticated" in res_no_token.json()["detail"]
+        # 4. Authentication success: Valid user token
+        user_token = create_token("bob", "user")
+        res_user = await client.get("/users/me", headers={"Authorization": f"Bearer {user_token}"})
+        assert res_user.status_code == 200
+        assert res_user.json() == {"user": "bob", "role": "user"}
 
-    # 3. Authentication failure: Invalid token -> 401 Unauthorized
-    res_bad_token = requests.get(f"{base_url}/users/me", headers={"Authorization": "Bearer invalid_garbage_token"})
-    assert res_bad_token.status_code == 401
+        # 5. Authorization failure: User accessing Admin endpoint -> 403 Forbidden (NOT 500)
+        res_admin_denied = await client.get("/admin/dashboard", headers={"Authorization": f"Bearer {user_token}"})
+        assert res_admin_denied.status_code == 403
+        assert res_admin_denied.json()["detail"] == "Admin privileges required"
 
-    # 4. Authentication success: Valid user token
-    user_token = create_token("bob", "user")
-    res_user = requests.get(f"{base_url}/users/me", headers={"Authorization": f"Bearer {user_token}"})
-    assert res_user.status_code == 200
-    assert res_user.json() == {"user": "bob", "role": "user"}
+        # 6. Authorization success: Admin accessing Admin endpoint -> 200 OK
+        admin_token = create_token("alice", "admin")
+        res_admin_allowed = await client.get("/admin/dashboard", headers={"Authorization": f"Bearer {admin_token}"})
+        assert res_admin_allowed.status_code == 200
+        assert res_admin_allowed.json() == {"message": "Welcome Admin alice!"}
 
-    # 5. Authorization failure: User accessing Admin endpoint -> 403 Forbidden (NOT 500)
-    res_admin_denied = requests.get(f"{base_url}/admin/dashboard", headers={"Authorization": f"Bearer {user_token}"})
-    assert res_admin_denied.status_code == 403
-    assert res_admin_denied.json()["detail"] == "Admin privileges required"
+        # 7. APIKeyHeader authentication: Invalid key -> 401
+        res_key_invalid = await client.get("/api-key-protected", headers={"X-API-Key": "wrong-key"})
+        assert res_key_invalid.status_code == 401
 
-    # 6. Authorization success: Admin accessing Admin endpoint -> 200 OK
-    admin_token = create_token("alice", "admin")
-    res_admin_allowed = requests.get(f"{base_url}/admin/dashboard", headers={"Authorization": f"Bearer {admin_token}"})
-    assert res_admin_allowed.status_code == 200
-    assert res_admin_allowed.json() == {"message": "Welcome Admin alice!"}
-
-    # 7. APIKeyHeader authentication: Invalid key -> 401
-    res_key_invalid = requests.get(f"{base_url}/api-key-protected", headers={"X-API-Key": "wrong-key"})
-    assert res_key_invalid.status_code == 401
-
-    # 8. APIKeyHeader authentication: Valid key -> 200
-    res_key_valid = requests.get(f"{base_url}/api-key-protected", headers={"X-API-Key": "secret-api-key-999"})
-    assert res_key_valid.status_code == 200
-    assert res_key_valid.json() == {"status": "valid key"}
+        # 8. APIKeyHeader authentication: Valid key -> 200
+        res_key_valid = await client.get("/api-key-protected", headers={"X-API-Key": "secret-api-key-999"})
+        assert res_key_valid.status_code == 200
+        assert res_key_valid.json() == {"status": "valid key"}
