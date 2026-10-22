@@ -39,6 +39,23 @@ from .responses import FileResponse
 from . import responses, middleware, security, openapi
 
 
+def load_onnx(model_path: str, providers: Optional[List[str]] = None) -> Any:
+    """Load an ONNX model for hardware-accelerated AI inference with zero-copy execution.
+    Requires optional dependency: pip install 'pyrustapi[ai]' (or pip install onnxruntime)
+    """
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        raise ImportError(
+            "ONNX Runtime is required for native model inference. "
+            "Install it via: pip install 'pyrustapi[ai]' (or pip install onnxruntime)"
+        )
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = 4
+    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    return ort.InferenceSession(model_path, sess_options=opts, providers=providers or ["CPUExecutionProvider"])
+
+
 class Engine(_RustEngine):
     """RustAPI Engine application class wrapping the Rust Tokio core engine."""
 
@@ -72,6 +89,15 @@ class Engine(_RustEngine):
         """Register a zero-GIL Rust-native SQL route directly connected to the database pool."""
         super().add_sql_route(path, query, method=method, status_code=status_code, cache_ttl=cache_ttl, rate_limit=rate_limit)
 
+    def add_sse_route(
+        self,
+        path: str,
+        topic: str,
+        rate_limit: Optional[str] = None,
+    ) -> None:
+        """Register a zero-GIL Server-Sent Events (SSE) route connected directly to a Rust pub/sub broadcast channel."""
+        super().add_sse_route(path, topic, rate_limit=rate_limit)
+
     def clear_cache(self) -> None:
         """Clear all in-memory cached responses in the Rust core."""
         super().clear_cache()
@@ -92,6 +118,12 @@ class Engine(_RustEngine):
     def broadcast(self, topic: str, message: Any) -> int:
         """Broadcast a message to all connected WebSocket subscribers of `topic` directly in Rust."""
         return super().broadcast(topic, message)
+
+    def load_onnx(self, model_path: str, providers: Optional[List[str]] = None) -> Any:
+        """Load an ONNX model for high-throughput AI inference with hardware acceleration.
+        Requires optional dependency: pip install 'pyrustapi[ai]' (or pip install onnxruntime)
+        """
+        return load_onnx(model_path, providers=providers)
 
     def _add_route_decorator(
         self,
@@ -119,6 +151,20 @@ class Engine(_RustEngine):
                 method=method,
                 status_code=status_code or 200,
                 cache_ttl=cache_ttl,
+                rate_limit=rate_limit,
+            )
+            def decorator(func: Any):
+                self._route_metadata.append((method, path, func, tags or [], merged_kwargs))
+                self._openapi_schema = None
+                return func
+            return decorator
+
+        if "sse" in kwargs:
+            sse_topic = kwargs.pop("sse")
+            rate_limit = kwargs.pop("rate_limit", None)
+            self.add_sse_route(
+                path,
+                sse_topic,
                 rate_limit=rate_limit,
             )
             def decorator(func: Any):
@@ -1262,6 +1308,7 @@ __all__ = [
     "render_template",
     "cosine_similarity",
     "vector_search",
+    "load_onnx",
     "status",
     "jsonable_encoder",
     "Body",

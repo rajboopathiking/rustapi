@@ -61,6 +61,22 @@ class UploadFile:
         res = self.file.write(data)
         return AwaitableInt(res)
 
+    def save_to(self, destination_path: str) -> AwaitableInt:
+        """Stream file contents directly to destination file path."""
+        self.file.seek(0)
+        with open(destination_path, "wb") as f:
+            written = f.write(self.file.read())
+        return AwaitableInt(written)
+
+    @property
+    def size(self) -> int:
+        """Total size of uploaded file in bytes."""
+        pos = self.file.tell()
+        self.file.seek(0, io.SEEK_END)
+        s = self.file.tell()
+        self.file.seek(pos)
+        return s
+
     def close(self) -> AwaitableNone:
         self.file.close()
         return AwaitableNone()

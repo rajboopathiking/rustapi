@@ -159,6 +159,7 @@ struct NativeRouteEntry {
     sql_query: Option<String>,
     cache_ttl_secs: Option<u64>,
     rate_limit: Option<(u64, Duration)>,
+    sse_topic: Option<String>,
 }
 
 type NativeRoutes = Arc<StdMutex<Vec<NativeRouteEntry>>>;
@@ -1075,6 +1076,33 @@ impl PyUploadFile {
         let bytes_obj = PyBytes::new_bound(py, &self.file_data);
         io.call_method1("BytesIO", (bytes_obj,)).map(|b| b.unbind())
     }
+
+    #[pyo3(signature = (destination_path))]
+    fn save_to(&self, py: Python<'_>, destination_path: &str) -> PyResult<PyObject> {
+        let dest = destination_path.to_string();
+        let data = self.file_data.clone();
+        let bytes_written = py.allow_threads(move || -> std::io::Result<u64> {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&dest)?;
+            f.write_all(&data)?;
+            f.flush()?;
+            Ok(data.len() as u64)
+        }).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+
+        if let Ok(py_module) = py.import_bound("rustapi.uploads") {
+            if let Ok(awaitable_cls) = py_module.getattr("AwaitableInt") {
+                if let Ok(res) = awaitable_cls.call1((bytes_written,)) {
+                    return Ok(res.unbind());
+                }
+            }
+        }
+        Ok(bytes_written.to_object(py))
+    }
+
+    #[getter]
+    fn size(&self) -> usize {
+        self.file_data.len()
+    }
 }
 
 fn serde_to_pyobject(py: Python<'_>, val: &serde_json::Value) -> PyResult<PyObject> {
@@ -1843,6 +1871,7 @@ def _schema_from_signature(func):
             sql_query: None,
             cache_ttl_secs: cache_ttl,
             rate_limit: rl,
+            sse_topic: None,
         };
         let mut guard = self.native_routes.lock().unwrap();
         if let Some(existing) = guard.iter_mut().find(|r| r.method == entry.method && r._original_path == entry._original_path) {
@@ -1866,6 +1895,31 @@ def _schema_from_signature(func):
             sql_query: Some(query),
             cache_ttl_secs: cache_ttl,
             rate_limit: rl,
+            sse_topic: None,
+        };
+        let mut guard = self.native_routes.lock().unwrap();
+        if let Some(existing) = guard.iter_mut().find(|r| r.method == entry.method && r._original_path == entry._original_path) {
+            *existing = entry;
+        } else {
+            guard.push(entry);
+        }
+    }
+
+    #[pyo3(signature = (path, topic, rate_limit=None))]
+    fn add_sse_route(&self, path: String, topic: String, rate_limit: Option<&str>) {
+        let segments = parse_pattern(&path);
+        let rl = rate_limit.and_then(parse_rate_limit);
+        let entry = NativeRouteEntry {
+            method: "GET".to_string(),
+            _original_path: path.clone(),
+            segments,
+            body: String::new(),
+            status_code: 200,
+            content_type: "text/event-stream".to_string(),
+            sql_query: None,
+            cache_ttl_secs: None,
+            rate_limit: rl,
+            sse_topic: Some(topic),
         };
         let mut guard = self.native_routes.lock().unwrap();
         if let Some(existing) = guard.iter_mut().find(|r| r.method == entry.method && r._original_path == entry._original_path) {
@@ -1953,6 +2007,18 @@ def _schema_from_signature(func):
                 match_native_route(&guard, &method, &path)
             };
             if let Some((entry, params)) = matched_native {
+                if let Some(ref _topic) = entry.sse_topic {
+                    let mut h = HashMap::new();
+                    h.insert("content-type".to_string(), "text/event-stream".to_string());
+                    h.insert("cache-control".to_string(), "no-cache".to_string());
+                    Python::with_gil(|py| {
+                        let res_tuple: PyObject = (200, ": connected\n\n".to_string(), h).into_py(py);
+                        if let Ok(set_res) = fut_py_cb.bind(py).getattr("set_result") {
+                            let _ = loop_py_cb.bind(py).call_method1("call_soon_threadsafe", (set_res, res_tuple));
+                        }
+                    });
+                    return;
+                }
                 let (status_code, content_type, body_str) = if let Some(ref q) = entry.sql_query {
                     let pools = db_pools.lock().unwrap().clone();
                     execute_native_sql(&pools, q, &params).await
@@ -2575,6 +2641,46 @@ async fn handle(
                     .unwrap();
                 return Ok(resp);
             }
+        }
+
+        if let Some(ref topic) = entry.sse_topic {
+            let rx = {
+                let mut guard = broadcaster.lock().unwrap();
+                let tx = guard.entry(topic.clone()).or_insert_with(|| {
+                    let (tx, _rx) = tokio::sync::broadcast::channel(2048);
+                    tx
+                });
+                tx.subscribe()
+            };
+
+            let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        let chunk = hyper::body::Bytes::from(format!("data: {}\n\n", msg));
+                        Some((Ok::<_, hyper::Error>(chunk), rx))
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let chunk = hyper::body::Bytes::from(": missed\n\n");
+                        Some((Ok::<_, hyper::Error>(chunk), rx))
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+                }
+            });
+
+            let initial = futures_util::stream::once(async {
+                Ok::<_, hyper::Error>(hyper::body::Bytes::from(": connected\n\n"))
+            });
+            let body_stream = futures_util::StreamExt::chain(initial, stream);
+
+            let resp = HyperResponse::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .header("cache-control", "no-cache")
+                .header("connection", "keep-alive")
+                .header("x-accel-buffering", "no")
+                .body(Body::wrap_stream(body_stream))
+                .unwrap();
+            return Ok(resp);
         }
 
         let (status_code, content_type, body_str) = if let Some(ref q) = entry.sql_query {

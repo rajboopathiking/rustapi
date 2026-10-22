@@ -32,6 +32,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ai = [
+    "onnxruntime>=1.16",
+    "numpy>=1.20",
+]
 test = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21.0",
