@@ -2336,7 +2336,7 @@ def _schema_from_signature(func):
         socket.set_reuse_address(true).unwrap();
         #[cfg(unix)] socket.set_reuse_port(true).unwrap();
         socket.bind(&addr.into()).unwrap();
-        socket.listen(1024).unwrap();
+        socket.listen(4096).unwrap();
         let std_listener: std::net::TcpListener = socket.into();
         std_listener.set_nonblocking(true).unwrap();
 
@@ -2356,8 +2356,8 @@ def _schema_from_signature(func):
         let cache_arc             = self.cache.clone();
         let rate_limiter_arc      = self.rate_limiter.clone();
         let broadcaster_arc       = self.broadcaster.clone();
-        let num_cpus              = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        let gil_semaphore         = Arc::new(Semaphore::new(num_cpus * 2));
+        let worker_threads        = safe_workers;
+        let gil_semaphore         = Arc::new(Semaphore::new((worker_threads * 2).max(2)));
         let startup_handlers      = self.startup_handlers.clone();
         let shutdown_handlers     = self.shutdown_handlers.clone();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -2368,7 +2368,8 @@ def _schema_from_signature(func):
         let server_handle = thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .max_blocking_threads(num_cpus * 4)
+                .worker_threads(worker_threads)
+                .max_blocking_threads((worker_threads * 4).max(4))
                 .build()
                 .unwrap();
 
@@ -2384,6 +2385,8 @@ def _schema_from_signature(func):
                     return;
                 }
                 let _ = startup_tx.send(Ok(()));
+
+                let enable_access_log = std::env::var("RUSTAPI_LOG").ok().as_deref() != Some("0");
 
                 // Build and serve.
                 let make_svc = make_service_fn(move |conn: &hyper::server::conn::AddrStream| {
@@ -2420,7 +2423,7 @@ def _schema_from_signature(func):
                                 let duration = start_time.elapsed();
                                 let status_code = resp.as_ref().map(|res| res.status().as_u16()).unwrap_or(500);
                                 let duration_ms = duration.as_secs_f64() * 1000.0;
-                                if std::env::var("RUSTAPI_LOG").ok().as_deref() != Some("0") {
+                                if enable_access_log {
                                     println!(
                                         "INFO:     {} - \"{} {} HTTP/1.1\" {} - {:.2}ms",
                                         remote_addr, method, uri_str, status_code, duration_ms
