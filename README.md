@@ -18,13 +18,14 @@
 | Feature Area | Implementation Details |
 | :--- | :--- |
 | **FastAPI Compatibility** | `FastAPI` & `Request` aliases, `status` codes, declared `status_code` (e.g. `201`, `204`), async/sync `response_model` with `response_model_exclude`/`include`, structured `422` validation error handling, `FastAPI(lifespan=...)` ASGI context managers, `Depends(..., scope="function")`, `EventSourceResponse` (SSE), `jsonable_encoder`, `Query`/`Body`/`Path`/`Form`/`File`, `OAuth2PasswordBearer`, `HTTPBearer`, `APIKeyHeader`, `OpenIdConnect`, `get_openapi`, `app.frontend()`. |
+| **Maximum Rust Architecture** | Direct SQL routes (`@app.get(path, sql=...)`), lock-free TTL cache (`cache_ttl=60`), token-bucket rate limiter (`rate_limit="100/minute"`), SIMD vector similarity (`cosine_similarity`/`vector_search`), high-concurrency WebSockets pub/sub (`ws.subscribe`/`app.broadcast`), zero-copy disk streaming (`await file.save_to()`), and native SSE broadcast (`sse="topic"`). |
 | **HTTP & Routing** | FastAPI-style `@app.get`, `@app.post`, `APIRouter`, `Depends`, `app.dependency_overrides`, `response_model`, `reload=True`. |
 | **Rust-Native Tier 3 Routes** | `app.add_native_route()` zero-GIL C-speed fast-paths (**50,000+ req/sec**). |
 | **Database Engine** | `sqlx` SQLite & PostgreSQL pool (`app.connect_db()`) with zero-copy JSON streaming (`db.query_json()`). |
-| **Power Primitives** | Native Rust `encode_jwt()` / `decode_jwt()`, Argon2 `hash_password()` / `verify_password()`, MiniJinja `render_template()`. |
+| **Power Primitives** | Native Rust `encode_jwt()` / `decode_jwt()`, Argon2 `hash_password()` / `verify_password()`, MiniJinja `render_template()`, SIMD vector search. |
 | **Response Classes** | `HTMLResponse`, `JSONResponse`, `PlainTextResponse`, `RedirectResponse`, `StreamingResponse`, `EventSourceResponse`. |
-| **Request Ergonomics** | `req.json()`, `req.form`, `req.body`, `UploadFile`, `WebSocket`. |
-| **AI / MCP Integration** | Embedded Model Context Protocol server (`@app.tool()`, `@app.resource()`, `@app.prompt()`) at `POST /mcp`. |
+| **Request Ergonomics** | `req.json()`, `req.form`, `req.body`, `UploadFile` (with `save_to` zero-copy disk streaming), `WebSocket` (with pub/sub channels). |
+| **AI / MCP Integration** | Embedded Model Context Protocol server (`@app.tool()`, `@app.resource()`, `@app.prompt()`) at `POST /mcp`, plus optional hardware-accelerated ONNX serving (`pyrustapi[ai]`). |
 | **Telemetry & Observability** | Terminal access logging (`INFO: 127.0.0.1 - "GET /render HTTP/1.1" 200 - 0.45ms`), Swagger UI (`/docs`), OpenAPI (`/openapi.json`). |
 
 ---
@@ -59,13 +60,29 @@ Measured under identical business logic and schemas across Python and Node.js fr
 
 Detailed report & reproducible scripts: [`performance-reports/rustapi_vs_fastapi_vs_nodejs.md`](performance-reports/rustapi_vs_fastapi_vs_nodejs.md)
 
+#### 🚀 Maximum Native Rust Architecture Benchmarks (PyRustAPI vs FastAPI Uvicorn, $c=50$)
+
+Under high-concurrency production load with the maximum native Rust acceleration active:
+
+| Workload Scenario | FastAPI (Uvicorn) | PyRustAPI (Native Rust) | **Empirical Performance Boost** | Notes |
+| :--- | :---: | :---: | :---: | :--- |
+| **DDoS / Rate Limit Shield** (`/rate-limit`) | **2,092.4 req/s** *(24.0 ms)* | **62,723.6 req/s** *(0.79 ms)* | **🚀 +2,897.6% (30x faster)** | Handled in Tokio before Python wakes up |
+| **SIMD Vector Search** (10k vectors × 128 dim) | **247.45 ms** *(Python loop)* | **23.36 ms** *(AVX2 registers)* | **🧠 +959.0% (10.5x faster)** | Native SIMD vector distance |
+| **Database Query** (`/sql` SQLx vs SQLite) | **258.2 req/s** *(201.5 ms)* | **1,524.0 req/s** *(32.8 ms)* | **⚡ +490.2% (6x throughput)** | Direct socket wire-protocol streaming |
+| **Standard JSON Response** (`/json`) | **2,609.5 req/s** *(19.2 ms)* | **7,732.2 req/s** *(6.4 ms)* | **🔥 +196.3% (3x faster)** | Hyper Ingress + PyO3 C-bindings |
+| **In-Memory Cache Hit** (`/cached`) | **2,394.2 req/s** *(20.9 ms)* | **5,754.9 req/s** *(8.6 ms)* | **💾 +140.4% (2.4x faster)** | Lock-free DashMap cache (sub-100µs) |
+
+Detailed report: [`performance-reports/maximum_rust_architecture_benchmark.md`](performance-reports/maximum_rust_architecture_benchmark.md) & guide: [`docs/md/maximum_rust_architecture.md`](docs/md/maximum_rust_architecture.md)
+
 ---
 
-### 🏛️ The 3-Tier Execution Model
+### 🏛️ The Maximum Native Rust Execution Model
 
 1. **Tier 1 (FastAPI Drop-in)**: Standard Python `@app.get()`, `async def`, Pydantic models, and dependencies.
-2. **Tier 2 (Hybrid Rust Acceleration)**: Standard Python handlers utilizing native Rust power primitives (`db.query_json()` SQLite/PostgreSQL streaming, `rustapi.encode_jwt()`, `rustapi.hash_password()`, MiniJinja templates).
-3. **Tier 3 (Pure Rust Native Fast-Path)**: Zero-GIL C-speed routes registered with `app.add_native_route("/health", ...)` clocking **96,000+ req/sec** at **0.57ms p95 latency**.
+2. **Tier 2 (Hybrid Rust Acceleration)**: Standard Python handlers utilizing native Rust power primitives (`db.query_json()` SQLite/PostgreSQL streaming, `rustapi.encode_jwt()`, `rustapi.hash_password()`, MiniJinja templates, SIMD `cosine_similarity`).
+3. **Tier 3 (Pure Rust Native Fast-Paths & Wire Streaming)**: Zero-GIL routes registered via `@app.get(path, sql=...)`, `@app.get(path, sse=...)`, or `app.add_native_route("/health", ...)` clocking **up to 96,000+ req/sec** with sub-millisecond latencies.
+4. **Token-Bucket Shield & In-Memory TTL Cache**: Sub-50µs 429 DDoS mitigation and sub-100µs RAM cache hits handled completely in Rust.
+5. **Zero-Copy Disk Streaming**: High-throughput file uploads (`await file.save_to(path)`) streamed directly to disk at flat 15MB memory.
 
 ---
 
@@ -114,6 +131,7 @@ if __name__ == "__main__":
 ## 📚 Documentation Reference
 
 Detailed documentation is available in the [`docs/`](docs/) directory and project reference:
+- [⚡ Maximum Native Rust Architecture & Performance Guide](https://github.com/rajboopathiking/rustapi/blob/master/docs/md/maximum_rust_architecture.md)
 - [📖 Getting Started & Core Routing](https://github.com/rajboopathiking/rustapi/blob/master/docs/md/getting_started.md)
 - [🔒 Security, Authentication & JWT Guide](https://github.com/rajboopathiking/rustapi/blob/master/docs/md/security.md)
 - [📚 Complete API & Migration Guide](https://github.com/rajboopathiking/rustapi/blob/master/docs/md/docs.md)

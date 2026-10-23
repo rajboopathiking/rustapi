@@ -21,6 +21,7 @@
 
 | Section | Content Covered | Developer Benefit |
 | :--- | :--- | :--- |
+| **⚡ Maximum Native Rust Architecture** | Direct SQL fast-paths (`@app.get(path, sql=...)`), lock-free TTL cache (`cache_ttl=60`), token-bucket rate limiter (`rate_limit="100/minute"`), SIMD vector similarity (`cosine_similarity`/`vector_search`), high-concurrency WebSockets pub/sub (`ws.subscribe`/`app.broadcast`), zero-copy disk streaming (`await file.save_to()`), and native SSE broadcast (`sse="topic"`). | Up to **30x (+2,897%)** throughput speedup over standard FastAPI while maintaining 100% FastAPI DX (see [`maximum_rust_architecture.md`](maximum_rust_architecture.md)). |
 | **FastAPI Compatibility** | `from rustapi import FastAPI, Request, status`, `from rustapi.security import OAuth2PasswordBearer, HTTPBearer, APIKeyHeader, OpenIdConnect, SecurityScopes`, `from rustapi.openapi import get_swagger_ui_html, get_openapi, models`. | 100% FastAPI drop-in compatibility, security dependency modules, OpenAPI 3.1.0 models & generators, and SSE/SPA helpers (see [`fastapi_compatibility_and_features.md`](fastapi_compatibility_and_features.md)). |
 | **§1. Core Engine & Routing** | `Engine()`, `@app.get`, `@app.post`, `@app.put`, `@app.delete`, `@app.patch`, `sync` and `async def` handlers. | Quick reference for routing syntax & handler types. |
 | **§2. Request Metadata & Errors** | `req` (`PyRequest`) object, custom `Response(..., status_code, headers)`, `HTTPException`. | Inspect headers, query/path params, and raise clean HTTP errors. |
