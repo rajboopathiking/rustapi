@@ -2358,7 +2358,7 @@ def _schema_from_signature(func):
         let rate_limiter_arc      = self.rate_limiter.clone();
         let broadcaster_arc       = self.broadcaster.clone();
         let worker_threads        = safe_workers;
-        let gil_semaphore         = Arc::new(Semaphore::new((worker_threads * 1024).max(1024)));
+        let gil_semaphore         = Arc::new(Semaphore::new((worker_threads * 65536).max(65536)));
         let startup_handlers      = self.startup_handlers.clone();
         let shutdown_handlers     = self.shutdown_handlers.clone();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -3245,6 +3245,244 @@ async fn handle_route(
                 e.status_code,
             )
         });
+
+    // =========================================================================
+    // FAST-PATH: Immediate Coroutine with No Dependencies & No Models
+    // 0 semaphore wait, 1 single Python::with_gil acquisition, 0 string transcoding.
+    // =========================================================================
+    if is_immediate_coro && deps.is_empty() && background_task_param_name.is_none() && pydantic_model.is_none() && response_model.is_none() && !is_asgi {
+        return Python::with_gil(|py| -> Result<HyperResponse<Body>, String> {
+            let kwargs = pyo3::types::PyDict::new_bound(py);
+
+            // Enforce required parameters presence
+            for req_p in &required_params {
+                if !path_params.contains_key(req_p)
+                    && !query_params.contains_key(req_p)
+                    && !form_map.contains_key(req_p)
+                    && !files_map.contains_key(req_p)
+                {
+                    let resp = HyperResponse::builder()
+                        .status(422)
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(format!(r#"{{"detail":"Missing required parameter '{}'"}}"#, req_p)))
+                        .map_err(|e| e.to_string())?;
+                    return Ok(resp);
+                }
+            }
+
+            // Bind path parameters with type coercion
+            for (k, v) in &path_params {
+                if param_names.contains(k) {
+                    match param_types.get(k).unwrap_or(&ParamType::String) {
+                        ParamType::Int => {
+                            if let Ok(n) = v.parse::<i64>() {
+                                let _ = kwargs.set_item(k, n);
+                            } else {
+                                let resp = HyperResponse::builder()
+                                    .status(422)
+                                    .header("Content-Type", "application/json")
+                                    .body(Body::from(format!(r#"{{"detail":"Parameter '{}' must be an integer"}}"#, k)))
+                                    .map_err(|e| e.to_string())?;
+                                return Ok(resp);
+                            }
+                        }
+                        ParamType::Float => {
+                            if let Ok(f) = v.parse::<f64>() {
+                                let _ = kwargs.set_item(k, f);
+                            } else {
+                                let resp = HyperResponse::builder()
+                                    .status(422)
+                                    .header("Content-Type", "application/json")
+                                    .body(Body::from(format!(r#"{{"detail":"Parameter '{}' must be a float"}}"#, k)))
+                                    .map_err(|e| e.to_string())?;
+                                return Ok(resp);
+                            }
+                        }
+                        ParamType::Bool => {
+                            let b = v.eq_ignore_ascii_case("true") || v == "1";
+                            let _ = kwargs.set_item(k, b);
+                        }
+                        ParamType::String => {
+                            let _ = kwargs.set_item(k, v);
+                        }
+                    }
+                }
+            }
+
+            // Bind query parameters with type coercion
+            for (k, v) in &query_params {
+                if param_names.contains(k) {
+                    match param_types.get(k).unwrap_or(&ParamType::String) {
+                        ParamType::Int => {
+                            if let Ok(n) = v.parse::<i64>() {
+                                let _ = kwargs.set_item(k, n);
+                            } else {
+                                let resp = HyperResponse::builder()
+                                    .status(422)
+                                    .header("Content-Type", "application/json")
+                                    .body(Body::from(format!(r#"{{"detail":"Parameter '{}' must be an integer"}}"#, k)))
+                                    .map_err(|e| e.to_string())?;
+                                return Ok(resp);
+                            }
+                        }
+                        ParamType::Float => {
+                            if let Ok(f) = v.parse::<f64>() {
+                                let _ = kwargs.set_item(k, f);
+                            } else {
+                                let resp = HyperResponse::builder()
+                                    .status(422)
+                                    .header("Content-Type", "application/json")
+                                    .body(Body::from(format!(r#"{{"detail":"Parameter '{}' must be a float"}}"#, k)))
+                                    .map_err(|e| e.to_string())?;
+                                return Ok(resp);
+                            }
+                        }
+                        ParamType::Bool => {
+                            let b = v.eq_ignore_ascii_case("true") || v == "1";
+                            let _ = kwargs.set_item(k, b);
+                        }
+                        ParamType::String => {
+                            let _ = kwargs.set_item(k, v);
+                        }
+                    }
+                }
+            }
+
+            // Bind form parameters
+            for (k, v) in &form_map {
+                if param_names.contains(k) {
+                    let _ = kwargs.set_item(k, v);
+                }
+            }
+
+            // Lazy PyRequest allocation: only if handler explicitly declared 'request'
+            if let Some(ref req_name) = request_param_name {
+                let py_req = Py::new(py, PyRequest {
+                    method: method.clone(),
+                    path: path.clone(),
+                    path_params: path_params.clone(),
+                    query_params: query_params.clone(),
+                    headers: headers_map.clone(),
+                    cookies: cookies_map.clone(),
+                    form: form_map.clone(),
+                    files: files_map.clone(),
+                    body: body.clone(),
+                }).map_err(|e| e.to_string())?;
+                kwargs.set_item(req_name, py_req).map_err(|e| e.to_string())?;
+            }
+
+            // Execute handler inline with zero thread hopping
+            let call_res = if kwargs.is_empty() {
+                handler.bind(py).call0()
+            } else {
+                handler.bind(py).call((), Some(&kwargs))
+            };
+
+            let raw_res = match call_res {
+                Ok(res) => res,
+                Err(py_err) => {
+                    let val = py_err.value_bound(py);
+                    let status_code: u16 = val.getattr("status_code").and_then(|s| s.extract()).unwrap_or(500);
+                    let detail: String = val.getattr("detail").and_then(|d| d.extract()).unwrap_or_else(|_| val.to_string());
+                    let resp = HyperResponse::builder()
+                        .status(status_code)
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(format!(r#"{{"detail":"{}"}}"#, detail.replace('"', "\\\""))))
+                        .map_err(|e| e.to_string())?;
+                    return Ok(resp);
+                }
+            };
+
+            // Step immediate coroutine: send(None) -> StopIteration.value
+            let ret_val = match raw_res.call_method1("send", (py.None(),)) {
+                Ok(v) => v,
+                Err(e) => {
+                    if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
+                        e.value_bound(py).getattr("value").unwrap_or_else(|_| py.None().into_bound(py))
+                    } else {
+                        let val = e.value_bound(py);
+                        let status_code: u16 = val.getattr("status_code").and_then(|s| s.extract()).unwrap_or(500);
+                        let detail: String = val.getattr("detail").and_then(|d| d.extract()).unwrap_or_else(|_| val.to_string());
+                        let resp = HyperResponse::builder()
+                            .status(status_code)
+                            .header("Content-Type", "application/json")
+                            .body(Body::from(format!(r#"{{"detail":"{}"}}"#, detail.replace('"', "\\\""))))
+                            .map_err(|e| e.to_string())?;
+                        return Ok(resp);
+                    }
+                }
+            };
+
+            // Fast PyResponse unwrapping: extract bytes directly
+            if let Ok(resp_ref) = ret_val.extract::<PyRef<PyResponse>>() {
+                let status = resp_ref.status_code;
+                let mut builder = HyperResponse::builder().status(status);
+                let mut has_ct = false;
+                for (k, v) in &resp_ref.headers {
+                    if k.eq_ignore_ascii_case("content-type") {
+                        has_ct = true;
+                    }
+                    builder = builder.header(k.as_str(), v.as_str());
+                }
+                if !has_ct {
+                    builder = builder.header("Content-Type", "application/json");
+                }
+
+                let bytes: hyper::body::Bytes = if let Ok(b) = resp_ref.content.downcast_bound::<pyo3::types::PyBytes>(py) {
+                    hyper::body::Bytes::copy_from_slice(b.as_bytes())
+                } else if let Ok(s) = resp_ref.content.downcast_bound::<pyo3::types::PyString>(py) {
+                    hyper::body::Bytes::from(s.to_string())
+                } else {
+                    let dumped = serializer.bind(py).call1((&resp_ref.content,));
+                    if let Ok(res) = dumped {
+                        if let Ok(b) = res.downcast::<pyo3::types::PyBytes>() {
+                            hyper::body::Bytes::copy_from_slice(b.as_bytes())
+                        } else if let Ok(s) = res.extract::<String>() {
+                            hyper::body::Bytes::from(s)
+                        } else {
+                            hyper::body::Bytes::new()
+                        }
+                    } else {
+                        hyper::body::Bytes::new()
+                    }
+                };
+                let resp = builder.body(Body::from(bytes)).map_err(|e| e.to_string())?;
+                return Ok(resp);
+            }
+
+            // Plain dictionary or return value: serialize directly
+            let dumped = serializer.bind(py).call1((&ret_val,));
+            let (status, bytes) = match dumped {
+                Ok(res) => {
+                    let b = if let Ok(py_bytes) = res.downcast::<pyo3::types::PyBytes>() {
+                        hyper::body::Bytes::copy_from_slice(py_bytes.as_bytes())
+                    } else if let Ok(s) = res.extract::<String>() {
+                        hyper::body::Bytes::from(s)
+                    } else {
+                        hyper::body::Bytes::new()
+                    };
+                    (if route_status_code != 0 { route_status_code } else { 200 }, b)
+                }
+                Err(e) => {
+                    let val = e.value_bound(py);
+                    let status_code: u16 = val.getattr("status_code").and_then(|s| s.extract()).unwrap_or(500);
+                    let detail: String = val.getattr("detail").and_then(|d| d.extract()).unwrap_or_else(|_| val.to_string());
+                    let resp = HyperResponse::builder()
+                        .status(status_code)
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(format!(r#"{{"detail":"{}"}}"#, detail.replace('"', "\\\""))))
+                        .map_err(|e| e.to_string())?;
+                    return Ok(resp);
+                }
+            };
+            let resp = HyperResponse::builder()
+                .status(status)
+                .header("Content-Type", "application/json")
+                .body(Body::from(bytes))
+                .map_err(|e| e.to_string())?;
+            Ok(resp)
+        });
+    }
 
     // -- Dependency injection ---------------------------------------------
     let req_obj: PyObject = Python::with_gil(|py| {
