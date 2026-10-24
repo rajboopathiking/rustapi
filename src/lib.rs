@@ -86,6 +86,7 @@ struct RouteEntry {
     segments: Vec<Segment>,
     handler: Py<PyAny>,
     is_async: bool,
+    is_immediate_coro: bool,
     pydantic_model: Option<Py<PyAny>>,
     pydantic_param_name: Option<String>,
     request_schema_json: Option<String>,
@@ -2357,7 +2358,7 @@ def _schema_from_signature(func):
         let rate_limiter_arc      = self.rate_limiter.clone();
         let broadcaster_arc       = self.broadcaster.clone();
         let worker_threads        = safe_workers;
-        let gil_semaphore         = Arc::new(Semaphore::new((worker_threads * 2).max(2)));
+        let gil_semaphore         = Arc::new(Semaphore::new((worker_threads * 1024).max(1024)));
         let startup_handlers      = self.startup_handlers.clone();
         let shutdown_handlers     = self.shutdown_handlers.clone();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -2369,7 +2370,7 @@ def _schema_from_signature(func):
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .worker_threads(worker_threads)
-                .max_blocking_threads((worker_threads * 4).max(4))
+                .max_blocking_threads((worker_threads * 512).max(512))
                 .build()
                 .unwrap();
 
@@ -3228,13 +3229,13 @@ async fn handle_route(
     is_asgi: bool,
 ) -> Result<HyperResponse<Body>, String> {
     // Extract route metadata.
-    let (handler, is_async, pydantic_model, pydantic_param_name, request_param_name,
+    let (handler, is_async, is_immediate_coro, pydantic_model, pydantic_param_name, request_param_name,
          background_task_param_name, deps, param_names, param_types, required_params, response_model, route_status_code) =
         Python::with_gil(|py| {
             let guard = routes.lock().unwrap();
             let e = &guard[idx];
             (
-                e.handler.clone_ref(py), e.is_async,
+                e.handler.clone_ref(py), e.is_async, e.is_immediate_coro,
                 e.pydantic_model.as_ref().map(|m| m.clone_ref(py)),
                 e.pydantic_param_name.clone(), e.request_param_name.clone(),
                 e.background_task_param_name.clone(),
@@ -3404,7 +3405,10 @@ async fn handle_route(
     let form_c              = form_map.clone();
     let files_c             = files_map.clone();
 
-    let permit = sem_c.acquire_owned().await.ok();
+    let permit = match sem_c.clone().try_acquire_owned() {
+        Ok(p) => Some(p),
+        Err(_) => sem_c.acquire_owned().await.ok(),
+    };
 
     let exec_res: PyResult<PyObject> = if is_async {
         let _permit = permit;
@@ -3500,7 +3504,24 @@ async fn handle_route(
                 kwargs.set_item(bg_name, bg_obj.bind(py))?;
             }
 
-            handler.bind(py).call((), Some(&kwargs)).map(|v| v.into())
+            let raw_res = handler.bind(py).call((), Some(&kwargs))?;
+            if is_immediate_coro {
+                match raw_res.call_method1("send", (py.None(),)) {
+                    Ok(val) => Ok(val.into()),
+                    Err(e) => {
+                        if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
+                            let ret = e.value_bound(py).getattr("value")
+                                .map(|v| v.unbind())
+                                .unwrap_or_else(|_| py.None());
+                            Ok(ret)
+                        } else {
+                            Err(e)
+                        }
+                    }
+                }
+            } else {
+                Ok(raw_res.into())
+            }
         })
     } else {
         tokio::task::spawn_blocking(move || {
@@ -3597,7 +3618,24 @@ async fn handle_route(
                     kwargs.set_item(bg_name, bg_obj.bind(py))?;
                 }
 
-                handler.bind(py).call((), Some(&kwargs)).map(|v| v.into())
+                let raw_res = handler.bind(py).call((), Some(&kwargs))?;
+            if is_immediate_coro {
+                match raw_res.call_method1("send", (py.None(),)) {
+                    Ok(val) => Ok(val.into()),
+                    Err(e) => {
+                        if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
+                            let ret = e.value_bound(py).getattr("value")
+                                .map(|v| v.unbind())
+                                .unwrap_or_else(|_| py.None());
+                            Ok(ret)
+                        } else {
+                            Err(e)
+                        }
+                    }
+                }
+            } else {
+                Ok(raw_res.into())
+            }
             })
         })
         .await
@@ -3621,8 +3659,9 @@ async fn handle_route(
     }
 
     // -- Normal / async handler -------------------------------------------
+    let actual_async = is_async && !is_immediate_coro;
     let (r_status, r_body, mut r_headers, is_exception) =
-        execute_python_handler(exec_res, is_async, serializer, filter_response, schedule_coro, false, response_model.as_ref(), route_status_code).await;
+        execute_python_handler(exec_res, actual_async, serializer, filter_response, schedule_coro, false, response_model.as_ref(), route_status_code).await;
 
     if !r_headers.keys().any(|k| k.eq_ignore_ascii_case("content-type")) {
         r_headers.insert("Content-Type".to_string(), "application/json".to_string());
@@ -3708,6 +3747,30 @@ impl RouteDecorator {
     fn __call__(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<Py<PyAny>> {
         let inspect  = py.import_bound("inspect")?;
         let is_async: bool = inspect.getattr("iscoroutinefunction")?.call1((func.bind(py),))?.extract()?;
+        let is_immediate_coro: bool = if is_async {
+            if let Ok(dis) = py.import_bound("dis") {
+                if let Ok(instructions) = dis.getattr("get_instructions")?.call1((func.bind(py),)) {
+                    let mut has_yield = false;
+                    if let Ok(iter) = instructions.iter() {
+                        for instr in iter.flatten() {
+                            if let Ok(opname) = instr.getattr("opname").and_then(|o| o.extract::<String>()) {
+                                if opname.contains("YIELD") || opname.contains("AWAIT") {
+                                    has_yield = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    !has_yield
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         let sig      = inspect.call_method1("signature", (func.bind(py),))?;
         let params   = sig.getattr("parameters")?;
 
@@ -3864,6 +3927,7 @@ impl RouteDecorator {
         self.routes.lock().unwrap().push(RouteEntry {
             method: self.method.clone(), original_path: self.path.clone(),
             segments: parse_pattern(&self.path), handler: func.clone_ref(py), is_async,
+            is_immediate_coro,
             pydantic_model, pydantic_param_name, request_schema_json,
             request_param_name, background_task_param_name, websocket_param_name,
             is_websocket: self.is_ws, dependencies, param_names, param_types, required_params,
