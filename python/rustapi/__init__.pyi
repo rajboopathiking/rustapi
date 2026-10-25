@@ -210,7 +210,21 @@ class Engine:
 
     # ---- Fast Paths & Rust Accelerators ----
     def add_native_route(self, path: str, body: str, method: str = "GET", status_code: int = 200, content_type: str = "application/json", cache_ttl: Optional[int] = None, rate_limit: Optional[str] = None) -> None: ...
-    def add_sql_route(self, path: str, query: str, method: str = "GET", status_code: int = 200, cache_ttl: Optional[int] = None, rate_limit: Optional[str] = None) -> None: ...
+    def add_sql_route(
+        self,
+        path: str,
+        query: str,
+        method: str = "GET",
+        status_code: int = 200,
+        cache_ttl: Optional[int] = None,
+        rate_limit: Optional[str] = None,
+        param_types: Optional[Dict[str, str]] = None,
+        raw: bool = False,
+        missing_status: int = 404,
+        missing_body: Optional[str] = None,
+        invalid_status: int = 400,
+        invalid_body: Optional[str] = None,
+    ) -> None: ...
     def add_sse_route(self, path: str, topic: str, rate_limit: Optional[str] = None) -> None: ...
     def clear_cache(self) -> None: ...
     @property

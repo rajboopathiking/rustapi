@@ -85,9 +85,33 @@ class Engine(_RustEngine):
         status_code: int = 200,
         cache_ttl: Optional[int] = None,
         rate_limit: Optional[str] = None,
+        param_types: Optional[Dict[str, str]] = None,
+        raw: bool = False,
+        missing_status: int = 404,
+        missing_body: Optional[str] = None,
+        invalid_status: int = 400,
+        invalid_body: Optional[str] = None,
     ) -> None:
-        """Register a zero-GIL Rust-native SQL route directly connected to the database pool."""
-        super().add_sql_route(path, query, method=method, status_code=status_code, cache_ttl=cache_ttl, rate_limit=rate_limit)
+        """Register a zero-GIL Rust-native SQL route directly connected to the database pool.
+
+        ``:name`` / ``{name}`` tokens are replaced with real bound placeholders (no string
+        interpolation). ``raw=True`` returns a single-row/single-column result byte-for-byte,
+        which lets SQLite's ``json_object`` output go straight to the socket.
+        """
+        super().add_sql_route(
+            path,
+            query,
+            method=method,
+            status_code=status_code,
+            cache_ttl=cache_ttl,
+            rate_limit=rate_limit,
+            param_types=param_types,
+            raw=raw,
+            missing_status=missing_status,
+            missing_body=missing_body,
+            invalid_status=invalid_status,
+            invalid_body=invalid_body,
+        )
 
     def add_sse_route(
         self,
@@ -145,6 +169,12 @@ class Engine(_RustEngine):
             sql_query = kwargs.pop("sql")
             cache_ttl = kwargs.pop("cache_ttl", None)
             rate_limit = kwargs.pop("rate_limit", None)
+            param_types = kwargs.pop("param_types", None)
+            raw = kwargs.pop("raw", False)
+            missing_status = kwargs.pop("missing_status", 404)
+            missing_body = kwargs.pop("missing_body", None)
+            invalid_status = kwargs.pop("invalid_status", 400)
+            invalid_body = kwargs.pop("invalid_body", None)
             self.add_sql_route(
                 path,
                 sql_query,
@@ -152,6 +182,12 @@ class Engine(_RustEngine):
                 status_code=status_code or 200,
                 cache_ttl=cache_ttl,
                 rate_limit=rate_limit,
+                param_types=param_types,
+                raw=raw,
+                missing_status=missing_status,
+                missing_body=missing_body,
+                invalid_status=invalid_status,
+                invalid_body=invalid_body,
             )
             def decorator(func: Any):
                 self._route_metadata.append((method, path, func, tags or [], merged_kwargs))
@@ -1269,7 +1305,7 @@ class RedirectResponse(Response):
         return Response.__new__(cls, content="", status_code=status_code, headers=h)
 
 
-__version__ = "1.9.0b12"
+__version__ = "1.9.0b13"
 __all__ = [
     "Engine",
     "FastAPI",

@@ -179,6 +179,21 @@ fn parse_rate_limit(s: &str) -> Option<(u64, Duration)> {
 
 type RateLimiter = Arc<StdMutex<HashMap<(String, String), (f64, std::time::Instant)>>>;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NativeParamType {
+    String,
+    Int,
+    PosInt,
+    Float,
+}
+
+#[derive(Clone)]
+enum SqlBindValue {
+    Int(i64),
+    Float(f64),
+    Text(String),
+}
+
 #[derive(Clone)]
 struct NativeRouteEntry {
     method: String,
@@ -188,6 +203,12 @@ struct NativeRouteEntry {
     status_code: u16,
     content_type: String,
     sql_query: Option<String>,
+    param_types: HashMap<String, NativeParamType>,
+    raw_result: bool,
+    missing_status: u16,
+    missing_body: Option<String>,
+    invalid_status: u16,
+    invalid_body: Option<String>,
     cache_ttl_secs: Option<u64>,
     rate_limit: Option<(u64, Duration)>,
     sse_topic: Option<String>,
@@ -195,9 +216,9 @@ struct NativeRouteEntry {
 
 type NativeRoutes = Arc<StdMutex<Vec<NativeRouteEntry>>>;
 
-fn match_native_route(routes: &[NativeRouteEntry], method: &str, path: &str) -> Option<(NativeRouteEntry, HashMap<String, String>)> {
+fn match_native_route(routes: &[NativeRouteEntry], method: &str, path: &str) -> Option<(usize, HashMap<String, String>)> {
     let req_segs = path_segments(path);
-    for r in routes.iter() {
+    for (idx, r) in routes.iter().enumerate() {
         if r.method != method {
             continue;
         }
@@ -238,122 +259,373 @@ fn match_native_route(routes: &[NativeRouteEntry], method: &str, path: &str) -> 
                 }
             }
         }
-        if ok { return Some((r.clone(), params)); }
+        if ok { return Some((idx, params)); }
     }
     None
 }
 
-async fn execute_native_sql(
-    pools_opt: &Option<DbPools>,
+fn is_sql_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_'
+}
+
+fn is_sql_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn parse_native_param_type(raw: &str) -> NativeParamType {
+    match raw.to_ascii_lowercase().as_str() {
+        "int" | "i64" | "integer" => NativeParamType::Int,
+        "posint" | "uint" | "positive_int" => NativeParamType::PosInt,
+        "float" | "f64" | "number" => NativeParamType::Float,
+        _ => NativeParamType::String,
+    }
+}
+
+fn bind_native_param(
+    out: &mut String,
+    binds: &mut Vec<SqlBindValue>,
+    name: &str,
+    params: &HashMap<String, String>,
+    types: &HashMap<String, NativeParamType>,
+    dollar_placeholders: bool,
+) -> Result<(), String> {
+    let raw = params.get(name)
+        .ok_or_else(|| format!("missing path parameter '{}'", name))?;
+    let ty = types.get(name).copied().unwrap_or(NativeParamType::String);
+    let value = match ty {
+        NativeParamType::String => SqlBindValue::Text(raw.clone()),
+        NativeParamType::Int => SqlBindValue::Int(
+            raw.parse::<i64>().map_err(|_| format!("parameter '{}' must be an integer", name))?
+        ),
+        NativeParamType::PosInt => {
+            let n = raw.parse::<i64>().map_err(|_| format!("parameter '{}' must be a positive integer", name))?;
+            if n <= 0 {
+                return Err(format!("parameter '{}' must be a positive integer", name));
+            }
+            SqlBindValue::Int(n)
+        }
+        NativeParamType::Float => SqlBindValue::Float(
+            raw.parse::<f64>().map_err(|_| format!("parameter '{}' must be a number", name))?
+        ),
+    };
+    binds.push(value);
+    if dollar_placeholders {
+        out.push('$');
+        out.push_str(&binds.len().to_string());
+    } else {
+        out.push('?');
+    }
+    Ok(())
+}
+
+/// Replaces `:name` / `{name}` tokens with real SQL placeholders while preserving
+/// string literals, quoted identifiers, and comments. Values are bound, never interpolated.
+fn render_sql_bindings(
     query: &str,
     params: &HashMap<String, String>,
-) -> (u16, String, String) {
+    types: &HashMap<String, NativeParamType>,
+    dollar_placeholders: bool,
+) -> Result<(String, Vec<SqlBindValue>), String> {
+    let bytes = query.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len + 16);
+    let mut binds = Vec::new();
+    let mut i = 0usize;
+    let mut last = 0usize;
+
+    while i < len {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < len {
+                    if bytes[i] == quote {
+                        if i + 1 < len && bytes[i + 1] == quote {
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'[' => {
+                i += 1;
+                while i < len && bytes[i] != b']' {
+                    i += 1;
+                }
+                if i < len {
+                    i += 1;
+                }
+            }
+            b'-' if i + 1 < len && bytes[i + 1] == b'-' => {
+                i += 2;
+                while i < len && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
+                i += 2;
+                while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(len);
+            }
+            b':' => {
+                if i + 1 < len && bytes[i + 1] == b':' {
+                    i += 2;
+                    continue;
+                }
+                if i + 1 < len && is_sql_ident_start(bytes[i + 1]) {
+                    let start = i;
+                    let name_start = i + 1;
+                    let mut name_end = name_start;
+                    while name_end < len && is_sql_ident_char(bytes[name_end]) {
+                        name_end += 1;
+                    }
+                    out.push_str(&query[last..start]);
+                    bind_native_param(&mut out, &mut binds, &query[name_start..name_end], params, types, dollar_placeholders)?;
+                    last = name_end;
+                    i = name_end;
+                } else {
+                    i += 1;
+                }
+            }
+            b'{' => {
+                if let Some(rel_end) = query[i + 1..].find('}') {
+                    let end = i + 1 + rel_end;
+                    let inner = &query[i + 1..end];
+                    let name = inner.split(':').next().unwrap_or(inner);
+                    out.push_str(&query[last..i]);
+                    bind_native_param(&mut out, &mut binds, name, params, types, dollar_placeholders)?;
+                    last = end + 1;
+                    i = end + 1;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&query[last..]);
+    Ok((out, binds))
+}
+
+fn native_error_bytes(message: &str) -> Vec<u8> {
+    format!(r#"{{"detail":"{}"}}"#, message.replace('"', "\\\"")).into_bytes()
+}
+
+fn native_invalid_response(entry: &NativeRouteEntry, message: String) -> (u16, String, Vec<u8>) {
+    let body = entry.invalid_body.clone()
+        .map(|s| s.into_bytes())
+        .unwrap_or_else(|| native_error_bytes(&message));
+    (entry.invalid_status, entry.content_type.clone(), body)
+}
+
+fn native_missing_response(entry: &NativeRouteEntry) -> Option<(u16, String, Vec<u8>)> {
+    entry.missing_body.clone().map(|body| {
+        (entry.missing_status, entry.content_type.clone(), body.into_bytes())
+    })
+}
+
+async fn execute_native_sql(
+    pools_opt: &Option<DbPools>,
+    entry: &NativeRouteEntry,
+    params: &HashMap<String, String>,
+) -> (u16, String, Vec<u8>) {
     let Some(pools) = pools_opt else {
-        return (500, "application/json".to_string(), r#"{"detail":"No active database pool connected"}"#.to_string());
+        return (500, "application/json".to_string(), native_error_bytes("No active database pool connected"));
+    };
+    let Some(query) = entry.sql_query.as_deref() else {
+        return (entry.status_code, entry.content_type.clone(), entry.body.as_bytes().to_vec());
     };
 
-    let mut resolved_sql = query.to_string();
-    for (k, v) in params {
-        let pat_colon = format!(":{}", k);
-        let pat_brace = format!("{{{}}}", k);
-        let sanitized = if v.chars().all(|c| c.is_ascii_digit() || c == '-') {
-            v.clone()
-        } else {
-            format!("'{}'", v.replace('\'', "''"))
-        };
-        resolved_sql = resolved_sql.replace(&pat_colon, &sanitized).replace(&pat_brace, &sanitized);
-    }
+    let is_pg = pools.sqlite.is_none() && pools.pg.is_some();
+    let (sql, binds) = match render_sql_bindings(query, params, &entry.param_types, is_pg) {
+        Ok(v) => v,
+        Err(msg) => return native_invalid_response(entry, msg),
+    };
 
-    let trimmed = resolved_sql.trim();
-    let is_mutation = trimmed.starts_with("INSERT") || trimmed.starts_with("insert")
-        || trimmed.starts_with("UPDATE") || trimmed.starts_with("update")
-        || trimmed.starts_with("DELETE") || trimmed.starts_with("delete");
+    let trimmed = sql.trim();
+    let head = trimmed.get(..8).unwrap_or("").to_ascii_uppercase();
+    let is_mutation = head.starts_with("INSERT")
+        || head.starts_with("UPDATE")
+        || head.starts_with("DELETE")
+        || trimmed.get(..7).map(|s| s.eq_ignore_ascii_case("REPLACE")).unwrap_or(false);
 
     if let Some(ref sqlite) = pools.sqlite {
         if is_mutation {
-            match sqlx::query(&resolved_sql).execute(sqlite).await {
-                Ok(res) => (200, "application/json".to_string(), format!(r#"{{"rows_affected":{}}}"#, res.rows_affected())),
-                Err(e) => (500, "application/json".to_string(), format!(r#"{{"detail":"{}"}}"#, e.to_string().replace('"', "\\\""))),
+            let mut q = sqlx::query(&sql);
+            for b in &binds {
+                q = match b {
+                    SqlBindValue::Int(v) => q.bind(*v),
+                    SqlBindValue::Float(v) => q.bind(*v),
+                    SqlBindValue::Text(v) => q.bind(v.as_str()),
+                };
             }
-        } else {
-            use sqlx::{Column, Row};
-            match sqlx::query(&resolved_sql).fetch_all(sqlite).await {
-                Ok(rows) => {
-                    let mut json = String::with_capacity(rows.len() * 128);
-                    json.push('[');
-                    for (i, row) in rows.iter().enumerate() {
-                        if i > 0 { json.push(','); }
-                        json.push('{');
-                        for (j, col) in row.columns().iter().enumerate() {
-                            if j > 0 { json.push(','); }
-                            let col_name = col.name();
-                            json.push('"');
-                            json.push_str(col_name);
-                            json.push_str("\":");
-                            if let Ok(i) = row.try_get::<i64, _>(col_name) {
-                                json.push_str(&i.to_string());
-                            } else if let Ok(s) = row.try_get::<String, _>(col_name) {
-                                json.push('"');
-                                json.push_str(&s.replace('\\', "\\\\").replace('"', "\\\""));
-                                json.push('"');
-                            } else if let Ok(f) = row.try_get::<f64, _>(col_name) {
-                                json.push_str(&f.to_string());
-                            } else if let Ok(b) = row.try_get::<bool, _>(col_name) {
-                                json.push_str(if b { "true" } else { "false" });
-                            } else {
-                                json.push_str("null");
-                            }
-                        }
-                        json.push('}');
-                    }
-                    json.push(']');
-                    (200, "application/json".to_string(), json)
-                }
-                Err(e) => (500, "application/json".to_string(), format!(r#"{{"detail":"{}"}}"#, e.to_string().replace('"', "\\\""))),
-            }
+            return match q.execute(sqlite).await {
+                Ok(res) => (entry.status_code, entry.content_type.clone(), format!(r#"{{"rows_affected":{}}}"#, res.rows_affected()).into_bytes()),
+                Err(e) => (500, "application/json".to_string(), native_error_bytes(&e.to_string())),
+            };
         }
+
+        use sqlx::{Column, Row};
+        let mut q = sqlx::query(&sql);
+        for b in &binds {
+            q = match b {
+                SqlBindValue::Int(v) => q.bind(*v),
+                SqlBindValue::Float(v) => q.bind(*v),
+                SqlBindValue::Text(v) => q.bind(v.as_str()),
+            };
+        }
+        return match q.fetch_all(sqlite).await {
+            Ok(rows) => {
+                if rows.is_empty() {
+                    if let Some(resp) = native_missing_response(entry) {
+                        return resp;
+                    }
+                }
+                if entry.raw_result && rows.len() == 1 {
+                    let columns = rows[0].columns();
+                    if columns.len() == 1 {
+                        let name = columns[0].name();
+                        if let Ok(s) = rows[0].try_get::<String, _>(name) {
+                            return (entry.status_code, entry.content_type.clone(), s.into_bytes());
+                        }
+                        if let Ok(n) = rows[0].try_get::<i64, _>(name) {
+                            return (entry.status_code, entry.content_type.clone(), n.to_string().into_bytes());
+                        }
+                        if let Ok(f) = rows[0].try_get::<f64, _>(name) {
+                            return (entry.status_code, entry.content_type.clone(), f.to_string().into_bytes());
+                        }
+                        if let Ok(b) = rows[0].try_get::<bool, _>(name) {
+                            return (entry.status_code, entry.content_type.clone(), if b { b"true".to_vec() } else { b"false".to_vec() });
+                        }
+                    }
+                }
+                let mut json = Vec::with_capacity(rows.len() * 128);
+                json.push(b'[');
+                for (i, row) in rows.iter().enumerate() {
+                    if i > 0 { json.push(b','); }
+                    json.push(b'{');
+                    for (j, col) in row.columns().iter().enumerate() {
+                        if j > 0 { json.push(b','); }
+                        let col_name = col.name();
+                        json.push(b'"');
+                        json.extend_from_slice(col_name.as_bytes());
+                        json.extend_from_slice(b"\":");
+                        if let Ok(n) = row.try_get::<i64, _>(col_name) {
+                            json.extend_from_slice(n.to_string().as_bytes());
+                        } else if let Ok(s) = row.try_get::<String, _>(col_name) {
+                            json.push(b'"');
+                            for byte in s.bytes() {
+                                match byte {
+                                    b'\\' => json.extend_from_slice(b"\\\\"),
+                                    b'"' => json.extend_from_slice(b"\\\""),
+                                    b'\n' => json.extend_from_slice(b"\\n"),
+                                    b'\r' => json.extend_from_slice(b"\\r"),
+                                    b'\t' => json.extend_from_slice(b"\\t"),
+                                    _ => json.push(byte),
+                                }
+                            }
+                            json.push(b'"');
+                        } else if let Ok(f) = row.try_get::<f64, _>(col_name) {
+                            json.extend_from_slice(f.to_string().as_bytes());
+                        } else if let Ok(b) = row.try_get::<bool, _>(col_name) {
+                            json.extend_from_slice(if b { b"true" } else { b"false" });
+                        } else {
+                            json.extend_from_slice(b"null");
+                        }
+                    }
+                    json.push(b'}');
+                }
+                json.push(b']');
+                (entry.status_code, entry.content_type.clone(), json)
+            }
+            Err(e) => (500, "application/json".to_string(), native_error_bytes(&e.to_string())),
+        };
     } else if let Some(ref pg) = pools.pg {
         if is_mutation {
-            match sqlx::query(&resolved_sql).execute(pg).await {
-                Ok(res) => (200, "application/json".to_string(), format!(r#"{{"rows_affected":{}}}"#, res.rows_affected())),
-                Err(e) => (500, "application/json".to_string(), format!(r#"{{"detail":"{}"}}"#, e.to_string().replace('"', "\\\""))),
+            let mut q = sqlx::query(&sql);
+            for b in &binds {
+                q = match b {
+                    SqlBindValue::Int(v) => q.bind(*v),
+                    SqlBindValue::Float(v) => q.bind(*v),
+                    SqlBindValue::Text(v) => q.bind(v.as_str()),
+                };
             }
-        } else {
-            use sqlx::{Column, Row, ValueRef};
-            match sqlx::query(&resolved_sql).fetch_all(pg).await {
-                Ok(rows) => {
-                    let mut records = Vec::new();
-                    for row in rows {
-                        let mut map = serde_json::Map::new();
-                        for col in row.columns() {
-                            let col_name = col.name();
-                            let val: serde_json::Value = match row.try_get_raw(col_name) {
-                                Ok(raw) if !raw.is_null() => {
-                                    if let Ok(i) = row.try_get::<i64, _>(col_name) {
-                                        serde_json::Value::Number(i.into())
-                                    } else if let Ok(f) = row.try_get::<f64, _>(col_name) {
-                                        serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap_or(serde_json::Number::from(0)))
-                                    } else if let Ok(b) = row.try_get::<bool, _>(col_name) {
-                                        serde_json::Value::Bool(b)
-                                    } else if let Ok(s) = row.try_get::<String, _>(col_name) {
-                                        serde_json::Value::String(s)
-                                    } else {
-                                        serde_json::Value::Null
-                                    }
-                                }
-                                _ => serde_json::Value::Null,
-                            };
-                            map.insert(col_name.to_string(), val);
-                        }
-                        records.push(serde_json::Value::Object(map));
+            return match q.execute(pg).await {
+                Ok(res) => (entry.status_code, entry.content_type.clone(), format!(r#"{{"rows_affected":{}}}"#, res.rows_affected()).into_bytes()),
+                Err(e) => (500, "application/json".to_string(), native_error_bytes(&e.to_string())),
+            };
+        }
+
+        use sqlx::{Column, Row, ValueRef};
+        let mut q = sqlx::query(&sql);
+        for b in &binds {
+            q = match b {
+                SqlBindValue::Int(v) => q.bind(*v),
+                SqlBindValue::Float(v) => q.bind(*v),
+                SqlBindValue::Text(v) => q.bind(v.as_str()),
+            };
+        }
+        match q.fetch_all(pg).await {
+            Ok(rows) => {
+                if rows.is_empty() {
+                    if let Some(resp) = native_missing_response(entry) {
+                        return resp;
                     }
-                    (200, "application/json".to_string(), serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string()))
                 }
-                Err(e) => (500, "application/json".to_string(), format!(r#"{{"detail":"{}"}}"#, e.to_string().replace('"', "\\\""))),
+                if entry.raw_result && rows.len() == 1 {
+                    let columns = rows[0].columns();
+                    if columns.len() == 1 {
+                        let name = columns[0].name();
+                        if let Ok(s) = rows[0].try_get::<String, _>(name) {
+                            return (entry.status_code, entry.content_type.clone(), s.into_bytes());
+                        }
+                        if let Ok(n) = rows[0].try_get::<i64, _>(name) {
+                            return (entry.status_code, entry.content_type.clone(), n.to_string().into_bytes());
+                        }
+                        if let Ok(f) = rows[0].try_get::<f64, _>(name) {
+                            return (entry.status_code, entry.content_type.clone(), f.to_string().into_bytes());
+                        }
+                        if let Ok(b) = rows[0].try_get::<bool, _>(name) {
+                            return (entry.status_code, entry.content_type.clone(), if b { b"true".to_vec() } else { b"false".to_vec() });
+                        }
+                    }
+                }
+                let mut records = Vec::new();
+                for row in rows {
+                    let mut map = serde_json::Map::new();
+                    for col in row.columns() {
+                        let col_name = col.name();
+                        let val: serde_json::Value = match row.try_get_raw(col_name) {
+                            Ok(raw) if !raw.is_null() => {
+                                if let Ok(i) = row.try_get::<i64, _>(col_name) {
+                                    serde_json::Value::Number(i.into())
+                                } else if let Ok(f) = row.try_get::<f64, _>(col_name) {
+                                    serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap_or(serde_json::Number::from(0)))
+                                } else if let Ok(b) = row.try_get::<bool, _>(col_name) {
+                                    serde_json::Value::Bool(b)
+                                } else if let Ok(s) = row.try_get::<String, _>(col_name) {
+                                    serde_json::Value::String(s)
+                                } else {
+                                    serde_json::Value::Null
+                                }
+                            }
+                            _ => serde_json::Value::Null,
+                        };
+                        map.insert(col_name.to_string(), val);
+                    }
+                    records.push(serde_json::Value::Object(map));
+                }
+                (entry.status_code, entry.content_type.clone(), serde_json::to_vec(&records).unwrap_or_else(|_| b"[]".to_vec()))
             }
+            Err(e) => (500, "application/json".to_string(), native_error_bytes(&e.to_string())),
         }
     } else {
-        (500, "application/json".to_string(), r#"{"detail":"No database pool available"}"#.to_string())
+        (500, "application/json".to_string(), native_error_bytes("No database pool available"))
     }
 }
 
@@ -1900,6 +2172,12 @@ def _schema_from_signature(func):
             status_code,
             content_type: content_type.to_string(),
             sql_query: None,
+            param_types: HashMap::new(),
+            raw_result: false,
+            missing_status: 404,
+            missing_body: None,
+            invalid_status: 400,
+            invalid_body: None,
             cache_ttl_secs: cache_ttl,
             rate_limit: rl,
             sse_topic: None,
@@ -1912,10 +2190,29 @@ def _schema_from_signature(func):
         }
     }
 
-    #[pyo3(signature = (path, query, method="GET", status_code=200, cache_ttl=None, rate_limit=None))]
-    fn add_sql_route(&self, path: String, query: String, method: &str, status_code: u16, cache_ttl: Option<u64>, rate_limit: Option<&str>) {
+    #[pyo3(signature = (path, query, method="GET", status_code=200, cache_ttl=None, rate_limit=None, param_types=None, raw=false, missing_status=404, missing_body=None, invalid_status=400, invalid_body=None))]
+    fn add_sql_route(
+        &self,
+        path: String,
+        query: String,
+        method: &str,
+        status_code: u16,
+        cache_ttl: Option<u64>,
+        rate_limit: Option<&str>,
+        param_types: Option<HashMap<String, String>>,
+        raw: bool,
+        missing_status: u16,
+        missing_body: Option<String>,
+        invalid_status: u16,
+        invalid_body: Option<String>,
+    ) {
         let segments = parse_pattern(&path);
         let rl = rate_limit.and_then(parse_rate_limit);
+        let types = param_types
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| (k, parse_native_param_type(&v)))
+            .collect();
         let entry = NativeRouteEntry {
             method: method.to_uppercase(),
             _original_path: path.clone(),
@@ -1924,6 +2221,12 @@ def _schema_from_signature(func):
             status_code,
             content_type: "application/json".to_string(),
             sql_query: Some(query),
+            param_types: types,
+            raw_result: raw,
+            missing_status,
+            missing_body,
+            invalid_status,
+            invalid_body,
             cache_ttl_secs: cache_ttl,
             rate_limit: rl,
             sse_topic: None,
@@ -1948,6 +2251,12 @@ def _schema_from_signature(func):
             status_code: 200,
             content_type: "text/event-stream".to_string(),
             sql_query: None,
+            param_types: HashMap::new(),
+            raw_result: false,
+            missing_status: 404,
+            missing_body: None,
+            invalid_status: 400,
+            invalid_body: None,
             cache_ttl_secs: None,
             rate_limit: rl,
             sse_topic: Some(topic),
@@ -2034,7 +2343,8 @@ def _schema_from_signature(func):
 
         get_db_rt().spawn(async move {
             let matched_native = match_native_route(&native_routes, &method, &path);
-            if let Some((entry, params)) = matched_native {
+            if let Some((idx, params)) = matched_native {
+                let entry = &native_routes[idx];
                 if let Some(ref _topic) = entry.sse_topic {
                     let mut h = HashMap::new();
                     h.insert("content-type".to_string(), "text/event-stream".to_string());
@@ -2047,12 +2357,13 @@ def _schema_from_signature(func):
                     });
                     return;
                 }
-                let (status_code, content_type, body_str) = if let Some(ref q) = entry.sql_query {
+                let (status_code, content_type, body_bytes) = if entry.sql_query.is_some() {
                     let pools = db_pools.lock().unwrap().clone();
-                    execute_native_sql(&pools, q, &params).await
+                    execute_native_sql(&pools, entry, &params).await
                 } else {
-                    (entry.status_code, entry.content_type, entry.body)
+                    (entry.status_code, entry.content_type.clone(), entry.body.as_bytes().to_vec())
                 };
+                let body_str = String::from_utf8_lossy(&body_bytes).into_owned();
                 let mut h = HashMap::new();
                 h.insert("content-type".to_string(), content_type);
                 Python::with_gil(|py| {
@@ -2649,7 +2960,8 @@ async fn handle(
 
     // 2. Check native routes (Static or Direct SQL)
     let matched_native = match_native_route(&native_routes, &method, &path);
-    if let Some((entry, params)) = matched_native {
+    if let Some((idx, params)) = matched_native {
+        let entry = &native_routes[idx];
         // Native route rate limiting
         if let Some((max_reqs, window)) = entry.rate_limit {
             let now = std::time::Instant::now();
@@ -2716,17 +3028,15 @@ async fn handle(
             return Ok(resp);
         }
 
-        let (status_code, content_type, body_str) = if let Some(ref q) = entry.sql_query {
+        let (status_code, content_type, body_bytes) = if entry.sql_query.is_some() {
             let pools = {
                 let guard = db_pools.lock().unwrap();
                 guard.clone()
             };
-            execute_native_sql(&pools, q, &params).await
+            execute_native_sql(&pools, entry, &params).await
         } else {
-            (entry.status_code, entry.content_type, entry.body)
+            (entry.status_code, entry.content_type.clone(), entry.body.as_bytes().to_vec())
         };
-
-        let body_bytes = body_str.into_bytes();
 
         // If route has cache TTL, save to cache
         if let Some(ttl) = entry.cache_ttl_secs {
