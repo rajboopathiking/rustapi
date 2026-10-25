@@ -106,6 +106,36 @@ struct RouteEntry {
     rate_limit: Option<(u64, Duration)>,
 }
 
+impl Clone for RouteEntry {
+    fn clone(&self) -> Self {
+        Python::with_gil(|py| RouteEntry {
+            method: self.method.clone(),
+            original_path: self.original_path.clone(),
+            segments: self.segments.clone(),
+            handler: self.handler.clone_ref(py),
+            is_async: self.is_async,
+            is_immediate_coro: self.is_immediate_coro,
+            pydantic_model: self.pydantic_model.as_ref().map(|m| m.clone_ref(py)),
+            pydantic_param_name: self.pydantic_param_name.clone(),
+            request_schema_json: self.request_schema_json.clone(),
+            request_param_name: self.request_param_name.clone(),
+            background_task_param_name: self.background_task_param_name.clone(),
+            websocket_param_name: self.websocket_param_name.clone(),
+            is_websocket: self.is_websocket,
+            dependencies: self.dependencies.clone(),
+            param_names: self.param_names.clone(),
+            param_types: self.param_types.clone(),
+            required_params: self.required_params.clone(),
+            response_model: self.response_model.as_ref().map(|m| m.clone_ref(py)),
+            tags: self.tags.clone(),
+            summary: self.summary.clone(),
+            description: self.description.clone(),
+            status_code: self.status_code,
+            rate_limit: self.rate_limit,
+        })
+    }
+}
+
 type Routes   = Arc<StdMutex<Vec<RouteEntry>>>;
 type Handlers = Arc<StdMutex<Vec<(Py<PyAny>, bool)>>>;
 
@@ -1993,8 +2023,8 @@ def _schema_from_signature(func):
         let sched = py_sched.call1((&loop_obj,))?;
         let schedule_coro = Arc::new(sched.unbind());
 
-        let routes = self.routes.clone();
-        let native_routes = self.native_routes.clone();
+        let routes = Arc::new(self.routes.lock().unwrap().clone());
+        let native_routes = Arc::new(self.native_routes.lock().unwrap().clone());
         let db_pools = self.db_pools.clone();
         let serializer = Arc::new(self.serializer.clone_ref(py));
         let filter_response = Arc::new(self.filter_response_fn.clone_ref(py));
@@ -2003,10 +2033,7 @@ def _schema_from_signature(func):
         let ext_td = teardown_list;
 
         get_db_rt().spawn(async move {
-            let matched_native = {
-                let guard = native_routes.lock().unwrap();
-                match_native_route(&guard, &method, &path)
-            };
+            let matched_native = match_native_route(&native_routes, &method, &path);
             if let Some((entry, params)) = matched_native {
                 if let Some(ref _topic) = entry.sse_topic {
                     let mut h = HashMap::new();
@@ -2048,10 +2075,7 @@ def _schema_from_signature(func):
                 }
             }
 
-            let matched = {
-                let guard = routes.lock().unwrap();
-                match_route(&guard, &method, &path)
-            };
+            let matched = match_route(&routes, &method, &path);
 
             if let Some((idx, path_params)) = matched {
                 let resp_res = handle_route(
@@ -2344,8 +2368,8 @@ def _schema_from_signature(func):
         eprintln!("INFO:     Started server process [{}]", std::process::id());
         eprintln!("INFO:     RustAPI server running on http://{host}:{port} (Press CTRL+C to quit)");
 
-        let routes                = self.routes.clone();
-        let native_routes         = self.native_routes.clone();
+        let routes                = Arc::new(self.routes.lock().unwrap().clone());
+        let native_routes         = Arc::new(self.native_routes.lock().unwrap().clone());
         let tools                 = self.tools.clone();
         let resources             = self.resources.clone();
         let prompts               = self.prompts.clone();
@@ -2367,12 +2391,20 @@ def _schema_from_signature(func):
         let (startup_tx, startup_rx) = oneshot::channel::<Result<(), String>>();
 
         let server_handle = thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .worker_threads(worker_threads)
-                .max_blocking_threads((worker_threads * 512).max(512))
-                .build()
-                .unwrap();
+            let rt = if worker_threads == 1 {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .max_blocking_threads(512)
+                    .build()
+                    .unwrap()
+            } else {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(worker_threads)
+                    .max_blocking_threads((worker_threads * 512).max(512))
+                    .build()
+                    .unwrap()
+            };
 
             rt.block_on(async move {
                 let sc2  = schedule_coro_arc.clone();
@@ -2567,8 +2599,8 @@ async fn run_lifecycle_handlers(
 
 async fn handle(
     mut req: HyperRequest<Body>,
-    routes: Routes,
-    native_routes: NativeRoutes,
+    routes: Arc<Vec<RouteEntry>>,
+    native_routes: Arc<Vec<NativeRouteEntry>>,
     serializer: Arc<PyObject>,
     filter_response: Arc<PyObject>,
     schedule_coro: Arc<PyObject>,
@@ -2616,10 +2648,7 @@ async fn handle(
     }
 
     // 2. Check native routes (Static or Direct SQL)
-    let matched_native = {
-        let guard = native_routes.lock().unwrap();
-        match_native_route(&guard, &method, &path)
-    };
+    let matched_native = match_native_route(&native_routes, &method, &path);
     if let Some((entry, params)) = matched_native {
         // Native route rate limiting
         if let Some((max_reqs, window)) = entry.rate_limit {
@@ -2748,11 +2777,10 @@ async fn handle(
         .unwrap_or(false);
 
     if is_ws_upgrade {
-        let matched = { let guard = routes.lock().unwrap(); match_route(&guard, "GET", &path) };
+        let matched = match_route(&routes, "GET", &path);
         if let Some((idx, _)) = matched {
             let (handler, ws_param_name) = Python::with_gil(|py| {
-                let guard = routes.lock().unwrap();
-                let entry = &guard[idx];
+                let entry = &routes[idx];
                 (entry.handler.clone_ref(py), entry.websocket_param_name.clone())
             });
             if let Some(ws_name) = ws_param_name {
@@ -2898,7 +2926,7 @@ async fn handle(
         (200u16, redoc_html(), h)
 
     } else if method == "GET" && path == "/openapi.json" {
-        let spec = { let guard = routes.lock().unwrap(); generate_openapi(&guard) };
+        let spec = generate_openapi(&routes);
         let mut h = HashMap::new();
         h.insert("Content-Type".to_string(), "application/json".to_string());
         (200u16, spec, h)
@@ -2914,12 +2942,9 @@ async fn handle(
 
     } else {
         // User-defined route.
-        match { let guard = routes.lock().unwrap(); match_route(&guard, &method, &path) } {
+        match match_route(&routes, &method, &path) {
             Some((idx, path_params)) => {
-                let rate_limit_rule = {
-                    let guard = routes.lock().unwrap();
-                    guard.get(idx).and_then(|r| r.rate_limit)
-                };
+                let rate_limit_rule = routes.get(idx).and_then(|r| r.rate_limit);
                 if let Some((max_reqs, window)) = rate_limit_rule {
                     let now = std::time::Instant::now();
                     let mut guard = rate_limiter.lock().unwrap();
@@ -3219,7 +3244,7 @@ async fn handle_route(
     query_params: HashMap<String, String>,
     form_map: HashMap<String, String>,
     files_map: HashMap<String, Vec<PyUploadFile>>,
-    routes: &Routes,
+    routes: &[RouteEntry],
     serializer: &Arc<PyObject>,
     filter_response: &Arc<PyObject>,
     schedule_coro: &Arc<PyObject>,
@@ -3228,34 +3253,18 @@ async fn handle_route(
     external_teardown_list: Option<&PyObject>,
     is_asgi: bool,
 ) -> Result<HyperResponse<Body>, String> {
-    // Extract route metadata.
-    let (handler, is_async, is_immediate_coro, pydantic_model, pydantic_param_name, request_param_name,
-         background_task_param_name, deps, param_names, param_types, required_params, response_model, route_status_code) =
-        Python::with_gil(|py| {
-            let guard = routes.lock().unwrap();
-            let e = &guard[idx];
-            (
-                e.handler.clone_ref(py), e.is_async, e.is_immediate_coro,
-                e.pydantic_model.as_ref().map(|m| m.clone_ref(py)),
-                e.pydantic_param_name.clone(), e.request_param_name.clone(),
-                e.background_task_param_name.clone(),
-                e.dependencies.clone(), e.param_names.clone(), e.param_types.clone(),
-                e.required_params.clone(),
-                e.response_model.as_ref().map(|m| m.clone_ref(py)),
-                e.status_code,
-            )
-        });
+    let route = &routes[idx];
 
     // =========================================================================
     // FAST-PATH: Immediate Coroutine with No Dependencies & No Models
     // 0 semaphore wait, 1 single Python::with_gil acquisition, 0 string transcoding.
     // =========================================================================
-    if is_immediate_coro && deps.is_empty() && background_task_param_name.is_none() && pydantic_model.is_none() && response_model.is_none() && !is_asgi {
+    if route.is_immediate_coro && route.dependencies.is_empty() && route.background_task_param_name.is_none() && route.pydantic_model.is_none() && route.response_model.is_none() && !is_asgi {
         return Python::with_gil(|py| -> Result<HyperResponse<Body>, String> {
             let kwargs = pyo3::types::PyDict::new_bound(py);
 
             // Enforce required parameters presence
-            for req_p in &required_params {
+            for req_p in &route.required_params {
                 if !path_params.contains_key(req_p)
                     && !query_params.contains_key(req_p)
                     && !form_map.contains_key(req_p)
@@ -3272,8 +3281,8 @@ async fn handle_route(
 
             // Bind path parameters with type coercion
             for (k, v) in &path_params {
-                if param_names.contains(k) {
-                    match param_types.get(k).unwrap_or(&ParamType::String) {
+                if route.param_names.contains(k) {
+                    match route.param_types.get(k).unwrap_or(&ParamType::String) {
                         ParamType::Int => {
                             if let Ok(n) = v.parse::<i64>() {
                                 let _ = kwargs.set_item(k, n);
@@ -3311,8 +3320,8 @@ async fn handle_route(
 
             // Bind query parameters with type coercion
             for (k, v) in &query_params {
-                if param_names.contains(k) {
-                    match param_types.get(k).unwrap_or(&ParamType::String) {
+                if route.param_names.contains(k) {
+                    match route.param_types.get(k).unwrap_or(&ParamType::String) {
                         ParamType::Int => {
                             if let Ok(n) = v.parse::<i64>() {
                                 let _ = kwargs.set_item(k, n);
@@ -3350,13 +3359,13 @@ async fn handle_route(
 
             // Bind form parameters
             for (k, v) in &form_map {
-                if param_names.contains(k) {
+                if route.param_names.contains(k) {
                     let _ = kwargs.set_item(k, v);
                 }
             }
 
             // Lazy PyRequest allocation: only if handler explicitly declared 'request'
-            if let Some(ref req_name) = request_param_name {
+            if let Some(ref req_name) = route.request_param_name {
                 let py_req = Py::new(py, PyRequest {
                     method: method.clone(),
                     path: path.clone(),
@@ -3373,9 +3382,9 @@ async fn handle_route(
 
             // Execute handler inline with zero thread hopping
             let call_res = if kwargs.is_empty() {
-                handler.bind(py).call0()
+                route.handler.bind(py).call0()
             } else {
-                handler.bind(py).call((), Some(&kwargs))
+                route.handler.bind(py).call((), Some(&kwargs))
             };
 
             let raw_res = match call_res {
@@ -3461,7 +3470,7 @@ async fn handle_route(
                     } else {
                         hyper::body::Bytes::new()
                     };
-                    (if route_status_code != 0 { route_status_code } else { 200 }, b)
+                    (if route.status_code != 0 { route.status_code } else { 200 }, b)
                 }
                 Err(e) => {
                     let val = e.value_bound(py);
@@ -3483,6 +3492,21 @@ async fn handle_route(
             Ok(resp)
         });
     }
+
+    // Fallback path: extract metadata for complex routes
+    let handler = Python::with_gil(|py| route.handler.clone_ref(py));
+    let is_async = route.is_async;
+    let is_immediate_coro = route.is_immediate_coro;
+    let pydantic_model = Python::with_gil(|py| route.pydantic_model.as_ref().map(|m| m.clone_ref(py)));
+    let pydantic_param_name = route.pydantic_param_name.clone();
+    let request_param_name = route.request_param_name.clone();
+    let background_task_param_name = route.background_task_param_name.clone();
+    let deps = route.dependencies.clone();
+    let param_names = route.param_names.clone();
+    let param_types = route.param_types.clone();
+    let required_params = route.required_params.clone();
+    let response_model = Python::with_gil(|py| route.response_model.as_ref().map(|m| m.clone_ref(py)));
+    let route_status_code = route.status_code;
 
     // -- Dependency injection ---------------------------------------------
     let req_obj: PyObject = Python::with_gil(|py| {
