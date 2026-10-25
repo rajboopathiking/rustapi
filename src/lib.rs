@@ -2361,7 +2361,7 @@ def _schema_from_signature(func):
         socket.set_reuse_address(true).unwrap();
         #[cfg(unix)] socket.set_reuse_port(true).unwrap();
         socket.bind(&addr.into()).unwrap();
-        socket.listen(4096).unwrap();
+        socket.listen(65535).unwrap();
         let std_listener: std::net::TcpListener = socket.into();
         std_listener.set_nonblocking(true).unwrap();
 
@@ -2749,23 +2749,7 @@ async fn handle(
     }
 
     let query_params = parse_query(req.uri().query());
-
-    // Collect headers and cookies.
-    let mut headers_map = HashMap::<String, String>::new();
-    let mut cookies_map = HashMap::<String, String>::new();
-    for (k, v) in req.headers() {
-        let key = k.as_str().to_string();
-        let val = v.to_str().unwrap_or("").to_string();
-        if key.eq_ignore_ascii_case("cookie") {
-            for pair in val.split(';') {
-                let mut parts = pair.trim().splitn(2, '=');
-                if let (Some(ck), Some(cv)) = (parts.next(), parts.next()) {
-                    cookies_map.insert(ck.to_string(), cv.to_string());
-                }
-            }
-        }
-        headers_map.insert(key, val);
-    }
+    let req_headers = req.headers().clone();
 
     // -----------------------------------------------------------------------
     // WebSocket upgrade path
@@ -2856,7 +2840,7 @@ async fn handle(
     let mut form_map  = HashMap::<String, String>::new();
     let mut files_map = HashMap::<String, Vec<PyUploadFile>>::new();
     let mut body_bytes = Vec::<u8>::new();
-    let content_type = headers_map.get("content-type").map(|s| s.as_str()).unwrap_or("");
+    let content_type = req_headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
 
     if let Ok(boundary) = multer::parse_boundary(content_type) {
         let mut multipart = multer::Multipart::new(req.into_body(), boundary);
@@ -2875,23 +2859,20 @@ async fn handle(
                 form_map.insert(name, field.text().await.unwrap_or_default());
             }
         }
+    } else if method == "GET" || method == "HEAD" {
+        // Zero-allocation path for GET/HEAD with no body
     } else {
-        use futures_util::StreamExt;
-        let mut body_stream = req.into_body();
-        while let Some(chunk) = body_stream.next().await {
-            if let Ok(data) = chunk {
-                if body_bytes.len() + data.len() > MAX_PAYLOAD_SIZE {
-                    let mut h = HashMap::new();
-                    h.insert("Content-Type".to_string(), "application/json".to_string());
-                    let resp = HyperResponse::builder()
-                        .status(413)
-                        .body(Body::from(r#"{"detail":"Payload Too Large"}"#))
-                        .unwrap();
-                    return Ok(resp);
-                }
-                body_bytes.extend_from_slice(&data);
-            }
+        let bytes = hyper::body::to_bytes(req.into_body()).await.unwrap_or_default();
+        if bytes.len() > MAX_PAYLOAD_SIZE {
+            let mut h = HashMap::new();
+            h.insert("Content-Type".to_string(), "application/json".to_string());
+            let resp = HyperResponse::builder()
+                .status(413)
+                .body(Body::from(r#"{"detail":"Payload Too Large"}"#))
+                .unwrap();
+            return Ok(resp);
         }
+        body_bytes = bytes.to_vec();
     }
     let body = String::from_utf8_lossy(&body_bytes).to_string();
 
@@ -2969,6 +2950,28 @@ async fn handle(
                         return Ok(resp);
                     }
                 }
+
+                let needs_headers = routes[idx].request_param_name.is_some() || !routes[idx].is_immediate_coro;
+                let (headers_map, cookies_map) = if needs_headers {
+                    let mut h_map = HashMap::<String, String>::new();
+                    let mut c_map = HashMap::<String, String>::new();
+                    for (k, v) in req_headers.iter() {
+                        let key = k.as_str().to_string();
+                        let val = v.to_str().unwrap_or("").to_string();
+                        if key.eq_ignore_ascii_case("cookie") {
+                            for pair in val.split(';') {
+                                let mut parts = pair.trim().splitn(2, '=');
+                                if let (Some(ck), Some(cv)) = (parts.next(), parts.next()) {
+                                    c_map.insert(ck.to_string(), cv.to_string());
+                                }
+                            }
+                        }
+                        h_map.insert(key, val);
+                    }
+                    (h_map, c_map)
+                } else {
+                    (HashMap::new(), HashMap::new())
+                };
 
                 let result = handle_route(
                     idx, path_params, method, path, body,
