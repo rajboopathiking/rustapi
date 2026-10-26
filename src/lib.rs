@@ -2463,10 +2463,13 @@ def _schema_from_signature(func):
                         .journal_mode(SqliteJournalMode::Wal)
                         .synchronous(SqliteSynchronous::Normal)
                         .busy_timeout(Duration::from_secs(10))
+                        .pragma("mmap_size", "268435456")
+                        .pragma("cache_size", "-16384")
+                        .pragma("temp_store", "MEMORY")
                         .create_if_missing(true);
 
                     let pool = SqlitePoolOptions::new()
-                        .max_connections(50)
+                        .max_connections(4)
                         .connect_with(opts)
                         .await
                         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
